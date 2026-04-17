@@ -14,8 +14,6 @@
 # separate adjacent clusters on the MST. The same procedure is repeated for
 # Chew grade as a complementary disease staging measure.
 #
-# Pipeline position: runs after clustering (02_clustering_trajectory.R).
-# Computationally intensive — requires cmdstanr backend.
 # =============================================================================
 
 # Required packages ------------------------------------------------------------

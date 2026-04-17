@@ -9,8 +9,6 @@
 # using the G-statistic (log-likelihood ratio test). A null distribution is
 # built from semi-random matrices that preserve observed row sums.
 #
-# Pipeline position: runs after clustering (02_clustering_trajectory.R).
-# Requires transition_counts from that script.
 # =============================================================================
 
 # Required packages ------------------------------------------------------------

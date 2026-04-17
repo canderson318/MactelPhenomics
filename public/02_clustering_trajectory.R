@@ -8,8 +8,6 @@
 # pseudoprogression score for each sample. Cluster-to-cluster transition
 # frequencies (from longitudinal data) are also calculated.
 #
-# Pipeline position: runs after imputation (01_imputation.R), before XGBoost
-# profiling (03_xgboost_shap.R) and network validation (04_network_flow_gtest.R).
 # =============================================================================
 
 # Required packages ------------------------------------------------------------
@@ -96,31 +94,17 @@ km_nn <- clusterCells(
 
 sce$km_nn_cluster <- km_nn$clusters
 
-# =============================================================================
-# STEP 4: Merge similar clusters
-# =============================================================================
-
-sce$my_cluster <- as.character(sce$km_nn_cluster)
-
-for (from_clust in names(cluster_merges)) {
-  sce$my_cluster[sce$my_cluster == from_clust] <- cluster_merges[[from_clust]]
-}
-
-# Re-factor sequentially
-sce$my_cluster <- factor(
-  as.numeric(factor(sce$my_cluster, levels = as.character(sort(unique(as.numeric(sce$my_cluster))))))
-)
 
 # =============================================================================
-# STEP 5: MST on cluster centroids in PCA space
+# STEP 4: MST on cluster centroids in PCA space
 # =============================================================================
 
-colLabels(sce) <- sce$my_cluster
+colLabels(sce) <- sce$km_nn_cluster
 
 # aggregate per cluster to get centroids
 by_cluster <- aggregateAcrossCells(sce,
                                    use.assay.type = "pmm_imp_of_scaled",
-                                   ids            = sce$my_cluster,
+                                   ids            = sce$km_nn_cluster,
                                    statistics     = "mean")
 
 centroids_pca <- reducedDim(by_cluster, "PCA")
@@ -133,60 +117,19 @@ pca_line_data  <- reportEdges(by_cluster, mst = mst_pca, clusters = NULL, use.di
 tsne_line_data <- reportEdges(by_cluster, mst = mst_pca, clusters = NULL, use.dimred = "TSNE")
 
 # =============================================================================
-# STEP 6: Pseudoprogression — project each sample onto MST path
+# STEP 5: Pseudoprogression — project each sample onto MST path
 # =============================================================================
 
 map_tscan       <- mapCellsToEdges(sce, mst = mst_pca, use.dimred = "PCA")
 tscan_pseudo    <- orderCells(map_tscan, mst_pca)
 sce$pseudoprog  <- averagePseudotime(tscan_pseudo)
 
-# =============================================================================
-# STEP 7: Cluster-to-cluster transition frequencies (longitudinal data)
-# Requires colData to contain: patID_eye (eye-level ID), month (visit time),
-# my_cluster (cluster assignment per visit).
-# =============================================================================
-
-num_clusts <- nlevels(sce$my_cluster)
-clust_levels <- levels(sce$my_cluster)
-
-pat_d <- as.data.frame(colData(sce)) |>
-  dplyr::arrange(patID_eye, month) |>
-  dplyr::select(patID_eye, month, my_cluster) |>
-  dplyr::mutate(my_cluster = as.numeric(as.character(my_cluster))) |>
-  dplyr::group_by(patID_eye) |>
-  dplyr::filter(dplyr::n_distinct(my_cluster) > 1) |>
-  dplyr::ungroup()
-
-# matrix: rows = destination cluster, cols = source cluster
-transition_counts <- matrix(
-  0L,
-  nrow = num_clusts, ncol = num_clusts,
-  dimnames = list(
-    paste0("to.",   clust_levels),
-    paste0("from.", clust_levels)
-  )
-)
-
-for (i in seq_len(num_clusts)) {
-  from_i <- pat_d |>
-    dplyr::group_by(patID_eye) |>
-    dplyr::arrange(month) |>
-    dplyr::filter(dplyr::lag(my_cluster) == i) |>
-    dplyr::ungroup() |>
-    dplyr::pull(my_cluster) |>
-    table()
-
-  for (nm in names(from_i)) {
-    transition_counts[paste0("to.", nm), paste0("from.", i)] <- from_i[[nm]]
-  }
-}
 
 # =============================================================================
 # OUTPUT
 # =============================================================================
 # sce              : SCE with reducedDims PCA/TSNE/UMAP, colData columns
-#                    km_nn_cluster, my_cluster, pseudoprog
+#                    km_nn_cluster, km_nn_cluster, pseudoprog
 # mst_pca          : igraph MST object
 # pca_line_data    : data.frame of MST edge coordinates in PCA space
 # tsne_line_data   : data.frame of MST edge coordinates in TSNE space
-# transition_counts: integer matrix (num_clusts x num_clusts) of observed transitions

@@ -8,7 +8,6 @@
 # identifies the most representative sample per cluster using predicted class
 # probabilities, restricted to samples with low raw missingness.
 #
-# Pipeline position: runs after clustering (02_clustering_trajectory.R).
 # =============================================================================
 
 # Required packages ------------------------------------------------------------

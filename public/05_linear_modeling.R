@@ -12,12 +12,12 @@
 #   B. Progression rate (Chew rate, pseudoprogression rate) ~ phenotypes / SNPs
 #   C. Time modelling: lm(progression_diff ~ year_diff * stage)
 #
-# Pipeline position: runs after clustering (02_clustering_trajectory.R).
 # Requires longitudinal data with trajectory labels and pseudoprogression scores.
 # =============================================================================
 
 # Required packages ------------------------------------------------------------
 library(lme4)      # lmer, glmer
+library(glme4)      # lmer, glmer
 library(lmerTest)  # p-values for lmer
 library(dplyr)     # data manipulation
 
@@ -41,7 +41,6 @@ pheno_cols <- NULL   # character vector of phenotype column names to loop over;
 snp_cols   <- NULL   # character vector of SNP column names to loop over;
                      # set to NULL to skip genetic models
 pc_cols    <- paste0("PC", 1:5)   # genetic PC column names for covariate adjustment
-p_adjust_method <- "BH"           # multiple testing correction (Benjamini-Hochberg)
 
 # =============================================================================
 # THEME A: Trajectory models (binary outcome: route A vs B)
@@ -73,7 +72,7 @@ if (!is.null(pheno_cols)) {
                p_value   = coef_row[, "Pr(>|z|)"])
   })
   traj_pheno_results <- do.call(rbind, Filter(Negate(is.null), traj_pheno_results))
-  traj_pheno_results$q_value <- p.adjust(traj_pheno_results$p_value, method = p_adjust_method)
+  traj_pheno_results$q_value <- p.adjust(traj_pheno_results$p_value, method = "BH")
 }
 
 # A3. Each SNP → trajectory (loop)
@@ -92,7 +91,7 @@ if (!is.null(snp_cols)) {
                p_value  = coef_row[, "Pr(>|z|)"])
   })
   snp_traj_results <- do.call(rbind, Filter(Negate(is.null), snp_traj_results))
-  snp_traj_results$q_value <- p.adjust(snp_traj_results$p_value, method = p_adjust_method)
+  snp_traj_results$q_value <- p.adjust(snp_traj_results$p_value, method = "BH")
 }
 
 # =============================================================================
@@ -137,7 +136,7 @@ if (!is.null(pheno_cols)) {
                p_value   = coef_row[, "Pr(>|t|)"])
   })
   pp_pheno_results <- do.call(rbind, Filter(Negate(is.null), pp_pheno_results))
-  pp_pheno_results$q_value <- p.adjust(pp_pheno_results$p_value, method = p_adjust_method)
+  pp_pheno_results$q_value <- p.adjust(pp_pheno_results$p_value, method = "BH")
 }
 
 # B4. Each SNP → phenotype (loop)
@@ -160,7 +159,7 @@ if (!is.null(snp_cols) && !is.null(pheno_cols)) {
   })
   snp_pheno_results <- do.call(rbind, Filter(Negate(is.null),
                                               do.call(c, snp_pheno_results)))
-  snp_pheno_results$q_value <- p.adjust(snp_pheno_results$p_value, method = p_adjust_method)
+  snp_pheno_results$q_value <- p.adjust(snp_pheno_results$p_value, method = "BH")
 }
 
 # =============================================================================
