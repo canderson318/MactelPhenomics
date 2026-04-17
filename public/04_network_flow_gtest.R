@@ -31,8 +31,8 @@ library(dplyr)    # data manipulation
 #                     cluster mean Chew grade.
 
 # Parameters -------------------------------------------------------------------
-n_null_matrices <- 500    # number of semi-random null matrices for null distribution
-null_seed       <- 4219   # reproducibility seed for null distribution
+n_null_matrices <- 1e4    # number of semi-random null matrices for null distribution
+null_seed       <- 123    # reproducibility seed for null distribution
 
 # =============================================================================
 # STEP 1: Observed transition matrix (symmetric, diagonal = 0)
@@ -45,24 +45,24 @@ clust_ids  <- as.character(seq_len(num_clusts))
 dimnames(obs_mat) <- list(clust_ids, clust_ids)
 
 # =============================================================================
-# STEP 2: Helper — G-statistic
-# Compares observed counts to expected counts derived from a graph structure.
-# Expected counts are proportional to graph adjacency (connected = positive weight,
-# disconnected = 0), scaled to match observed row sums.
+# STEP 2: Helpers
 # =============================================================================
 
-g_stat <- function(observed, graph) {
-  dist_mat   <- as.matrix(distances(graph, mode = "all"))
-  adj_mat    <- (dist_mat == 1) * 1.0            # adjacency: 1 if directly connected
-  diag(adj_mat) <- 0
+# G-statistic: 2 * sum(O * log(O/E)), off-diagonal only, ignoring zero cells
+compute_g_stat <- function(O, E) {
+  valid <- (O > 0 & E > 0) & (row(O) != col(O))
+  2 * sum(O[valid] * log(O[valid] / E[valid]))
+}
 
-  # for each source cluster (row), distribute row sum according to adjacency
-  expected <- sweep(adj_mat, 1, rowSums(adj_mat), "/")   # row-normalise
-  expected <- sweep(expected, 1, rowSums(observed), "*")  # scale to row counts
-
-  # G = 2 * sum(O * log(O/E)), ignoring zeros
-  mask <- observed > 0 & expected > 0
-  2 * sum(observed[mask] * log(observed[mask] / expected[mask]))
+# Convert a graph distance matrix to a row-normalised proximity-based expected
+# matrix scaled to the observed row sums.
+# Proximity = 1 / (1 + distance); diagonal forced to 0; then row-normalised.
+make_expected <- function(graph, observed) {
+  dist_mat <- as.matrix(distances(graph, mode = "all"))
+  prox     <- 1 / (1 + dist_mat)
+  diag(prox) <- 0
+  prob     <- sweep(prox, 1, rowSums(prox), "/")   # row-normalise
+  sweep(prob, 1, rowSums(observed), "*")            # scale to observed row sums
 }
 
 # =============================================================================
@@ -71,7 +71,7 @@ g_stat <- function(observed, graph) {
 
 bif_g <- graph_from_data_frame(mst_edges, directed = FALSE,
                                 vertices = data.frame(name = clust_ids))
-g_bif <- g_stat(obs_mat, bif_g)
+g_bif <- compute_g_stat(obs_mat, make_expected(bif_g, obs_mat))
 
 # =============================================================================
 # STEP 4: Linear graph ordered by pseudoprogression mean
@@ -84,7 +84,7 @@ pp_edges <- data.frame(
 )
 pp_g  <- graph_from_data_frame(pp_edges, directed = FALSE,
                                 vertices = data.frame(name = clust_ids))
-g_pp  <- g_stat(obs_mat, pp_g)
+g_pp  <- compute_g_stat(obs_mat, make_expected(pp_g, obs_mat))
 
 # =============================================================================
 # STEP 5: Linear graph ordered by Chew grade mean
@@ -97,7 +97,7 @@ chew_edges <- data.frame(
 )
 chew_g <- graph_from_data_frame(chew_edges, directed = FALSE,
                                  vertices = data.frame(name = clust_ids))
-g_chew <- g_stat(obs_mat, chew_g)
+g_chew <- compute_g_stat(obs_mat, make_expected(chew_g, obs_mat))
 
 # =============================================================================
 # STEP 6: Fully unordered (complete) graph
@@ -107,28 +107,27 @@ unord_edges <- as.data.frame(t(combn(clust_ids, 2)))
 names(unord_edges) <- c("from", "to")
 unord_g <- graph_from_data_frame(unord_edges, directed = FALSE,
                                   vertices = data.frame(name = clust_ids))
-g_unord <- g_stat(obs_mat, unord_g)
+g_unord <- compute_g_stat(obs_mat, make_expected(unord_g, obs_mat))
 
 # =============================================================================
 # STEP 7: Null distribution — semi-random matrices preserving row sums
 # =============================================================================
 
-row_sums_obs <- rowSums(obs_mat)
-
 set.seed(null_seed)
 null_g_stats <- replicate(n_null_matrices, {
-  # sample a random matrix row by row, preserving each row's sum
-  rand_mat <- t(sapply(row_sums_obs, function(rs) {
-    x <- rep(0, num_clusts)
-    if (rs > 0) {
-      idx <- sample(seq_len(num_clusts), min(rs, num_clusts), replace = rs > num_clusts)
-      x[idx] <- x[idx] + 1
-    }
-    x
-  }))
+  # build random matrix preserving each row's sum via rmultinom with uniform probs
+  rand_mat <- matrix(0L, nrow = num_clusts, ncol = num_clusts)
+  for (i in seq_len(num_clusts)) {
+    rs <- sum(obs_mat[i, ])
+    if (rs == 0) next
+    off_cols <- setdiff(seq_len(num_clusts), i)
+    probs    <- runif(length(off_cols))
+    probs    <- probs / sum(probs)
+    rand_mat[i, off_cols] <- rmultinom(1, size = rs, prob = probs)
+  }
   dimnames(rand_mat) <- list(clust_ids, clust_ids)
-  diag(rand_mat) <- 0
-  g_stat(rand_mat, bif_g)   # compare random matrix against bifurcated structure
+  # use random matrix as expected; compare against observed
+  compute_g_stat(obs_mat, rand_mat)
 })
 
 # =============================================================================

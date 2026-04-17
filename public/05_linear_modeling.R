@@ -17,7 +17,6 @@
 
 # Required packages ------------------------------------------------------------
 library(lme4)      # lmer, glmer
-library(glme4)      # lmer, glmer
 library(lmerTest)  # p-values for lmer
 library(dplyr)     # data manipulation
 
