@@ -1,0 +1,105 @@
+Supplementary Figures:
+
+
+
+Supplementary Figure 1: Imputation performance barplot. Every bar represents a variable in the dataset that needed imputation. The length of the bar is the correlation between the imputed values and the artificially removed ones. Colors represent the significance of the correlation. The percentage of missing values for each variable is also reported. 
+
+
+
+Supplementary Figure 2: Correlation heatmap between study features. Features are clustered to show similarities between them via Ward.D2 dendrogram.
+
+
+
+
+Supplementary Figure 3: Average of scaled feature values for heatmap across groups. Each column is a cluster group, and each row is a variable. Colors represent the mean of the scale feature in that group. Variable category is also represented, as well as cluster size. Both features, as well as cluster groups, are clustered to show similarities between them via Ward.D2 dendrogram.   
+
+
+
+
+Supplementary Figure 4: SHAP value for the most representative variables in each cluster. 
+
+
+
+
+Supplementary Figure 5: Continental representation proportions within each cluster. 
+
+
+
+
+
+
+
+
+Supplementary Figure 6: Sample retinal images for each cluster. a) Early staging clusters. b) Neurodegenerative route clusters. c) Vascular route clusters.
+
+
+
+Supplementary Figure 7: Violin plot of 7-grade progression score for each cluster.
+
+
+
+Supplementary Figure 8: Boxplot of pseudo-progression score for each cluster.
+
+
+
+
+Supplementary Figure 9: Boxplot of pseudo-progression score for each 7-grade progression score. The blue line corresponds to the regression line between the two. 
+
+
+
+Supplementary Figure 10 A-B: Transition proportion from one cluster to another calculated using the available longitudinal data. 
+
+
+
+Supplementary Figure 11: Likelihood ratio test for observed versus potential structures. The x-axis represents the G-statistics (the lowest, the closest to the observed transition scores). Each structure is presented on the y-axis.
+
+
+
+
+Supplementary Figure 12: MST robustness plot. Each facet represents a PCA with an MST plot calculated for a different subset of the data. Clusters are presented with different colors. The node for each cluster in the MST is also presented by labels within the PCA plot.
+
+
+Supplementary Figure 13: MST robustness plot. Each facet represents a PCA with an MST plot calculated for a different regional subset of the data. Clusters are presented with different colors. The node for each cluster in the MST is also presented by labels within the PCA plot.
+
+
+
+
+
+Supplementary Figure 14: MST robustness plot via multiple clustering iterations. The plot is a TSNE plot with each eye-visit colored by their cluster. Multiple MST solutions are presented, each derived from a different clustering solution that is different from the original.
+
+
+
+
+Supplementary Figure 15: PCA plot of eye trajectories classification. Each eye was classified as follows: either route A, B or none. The results are presented in this figure.
+
+
+Supplementary Figure 16A
+
+Supplementary Figure 16B
+
+
+Supplementary Figure 16: Progression rate over time by severity. A) pseudo-progression. B) 7-stage progression score. In this figure, each facet represents a different disease stage. The line represents the relationship between time and progression score. 
+
+
+
+
+Supplementary Figure 17A:  Progression time-shift result for each individual with longitudinal data based on the 7-stage progression score. The smoothed line represents the global progression pattern.
+
+
+
+
+Supplementary Figure 17B: Progression time-shift result for each individual with longitudinal data based on the pseudo-progression score. The smoothed line represents the global progression pattern.
+
+
+
+Supplementary Figure 17C: Predicted years needed to transition from 7-stage progression score 0 to all other scores.
+
+
+
+
+Supplementary Figure 17D: Predicted years needed to transition from cluster 1 to all other clusters.
+
+
+
+
+Supplementary Figure 18 A-D: Comparing the original linear modelling without observation from cluster 7 (n=XXX) and linear modelling including observation from cluster 7. 

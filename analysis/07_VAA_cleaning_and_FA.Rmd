@@ -1,0 +1,1276 @@
+---
+title: "08_functionAndStructure"
+author: "Christian Anderson"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# options
+```{r}
+# 
+# dev.off()  # Turn off the current graphics device
+# options(device = "RStudioGD")
+# quartz()
+```
+
+
+# Packages
+```{r, message=FALSE, warning=FALSE, results='hide', echo = TRUE}
+library(tidyr)
+library(dplyr)
+library(reshape2)
+library(purrr)
+library(GGally)
+library(tidyverse)
+library(ggpubr)
+library(vcd)
+library(UpSetR)
+library(ggplot2)
+library(gridExtra)
+library(BiocSingular)
+library(ComplexHeatmap)
+library(viridis)
+library(knitr)
+library(htmlwidgets)
+library(zoo)
+library(corrplot)
+library(RColorBrewer)
+library(openxlsx)
+library(plotly)
+library(RColorBrewer)
+library(mgcv)
+library(zoo)
+library(tools)
+library(mice)
+library(grDevices)
+library(ggrepel)
+library(networkD3)
+library(htmltools)
+library(grid)
+library(gplots)
+library(Metrics)
+library(psych)
+library(car)
+library(stats)
+library(lme4)
+library(reshape2)
+
+
+
+rm(list = ls())
+gc()
+
+source("/Users/canderson/Documents/LMRI/PRJ2024001/version015/analysis/00_MyFunctions.R")
+
+```
+
+Task: measure zone progression for each phenotype
+
+# Load Data
+
+```{r, message=FALSE, warning=FALSE, results='hide', echo = TRUE}
+wd_path = "~/Documents/LMRI/PRJ2024001/version015/"
+
+# # raw list of dfs
+# raw <- readRDS(paste0(wd_path, "processed_data/dfs_list_01.rds"))
+
+# joined cleaned joined data
+data_name <- "CF_FFA_DEM_DIAGNOSIS_ENRNHOR_ENRNHOS_FAFGRADE_FAMSTATUS_MH_OCTMAIN_OCTMTCIRRUS_OCTMTSPECTRALIS_OCTMTSTRATUS_VAA_lea_05.rds"
+d_raw <- readRDS(paste0(wd_path, "processed_data/", data_name))# clean data with everything 
+
+d <- d_raw
+
+# grading nomenclature and information
+info_path <- paste0(wd_path, "processed_data/database_grading_key_04.xlsx") 
+
+info <- read.xlsx(info_path)
+# ****** FUnction to query name in info ******
+var_summary <- function(names_vec = character()){
+  patt <- paste(names_vec, collapse = "|")  
+  m <- as.matrix(filter(info, grepl(patt, name, ignore.case = TRUE)))
+  rownames(m) <- m[,1]
+  print(kable(t(m), "simple"))
+  for(nm in m[,'name']){
+    cat(sprintf('\n%s\n', nm))
+    print(table(d[[nm]]))
+  }
+}
+
+```
+
+
+# make new directory for plots
+```{r}
+path <- paste0(wd_path, "results/VAA_analysis/")
+if(!dir.exists(path)) {
+  dir.create(path, recursive = TRUE)
+  
+}
+
+path <- paste0(wd_path, "results/VAA_analysis/missingness/")
+if(!dir.exists(path)) {
+  dir.create(path, recursive = TRUE)
+  
+}
+
+path <- paste0(wd_path, "results/VAA_analysis/imputation_testing/")
+if(!dir.exists(path)) {
+  dir.create(path, recursive = TRUE)
+  
+}
+
+path <- paste0(wd_path, "results/VAA_analysis/FA/")
+if(!dir.exists(path)) {
+  dir.create(path, recursive = TRUE)
+  
+}
+
+```
+
+# clean Data
+```{r, look at dims}
+check_dims <- function(D = d){
+  
+  cat(paste0("\ndims : ", paste(dim(D), collapse = " "),"\n"))
+  
+  n_patIDs <- D %>% 
+    select(patID, visitID, eye_num) %>% 
+    drop_na() %>% 
+    pull(patID ) %>% 
+    n_distinct(na.rm = TRUE)
+  
+  n_patID_eyes <- D %>% 
+    select(patID, visitID, eye_num) %>% 
+    drop_na() %>% 
+    select(patID, eye_num) %>% 
+    n_distinct(na.rm = TRUE)
+  
+  n_observations <- D %>% 
+    select(patID, visitID, eye_num) %>% 
+    drop_na() %>% 
+    n_distinct(na.rm = TRUE)
+  
+  n_patIDs_w_gr_1_vis <- D %>% 
+    select(patID, visitID, eye_num) %>% 
+    drop_na() %>% 
+    filter(n()>1, .by = c(patID, eye_num)) %>% 
+    pull(patID) %>% 
+    n_distinct(na.rm = TRUE)
+  
+  print(rbind(n_patIDs,n_patID_eyes,n_observations,n_patIDs_w_gr_1_vis))
+  
+}
+
+check_dims()
+# dims : 12600 319
+#                      [,1]
+# n_patIDs             3693
+# n_patID_eyes         7386
+# n_observations      12600
+# n_patIDs_w_gr_1_vis   516
+# ^ no changes
+
+### MARCH 14 2025 ###
+# dims : 12619 306
+# n_patIDs             4034
+# n_patID_eyes         8063
+# n_observations      12617
+# n_patIDs_w_gr_1_vis   500
+
+```
+
+
+#____________________________________________
+# look at VAA variables
+
+## barplot of number of records in VAA in dataset
+```{r}
+
+
+
+d %>% 
+  select(eye_num, any_of(info$name[info$table=="VAA" & !is.na(info$table)] )  ) %>% 
+  group_by(eye_num) %>% 
+  reframe(across(everything(), ~sum(!is.na(.)))) %>%
+  pivot_longer(-eye_num) %>% 
+  ggplot( aes(x= name, y = value, fill = factor(eye_num)))+
+  geom_bar(stat = "identity", show.legend = TRUE, position = "dodge")+
+  ggtitle("counts of available records for VAA variables")+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle =90, hjust = 1))
+ggsave(paste0(wd_path, "results/VAA_analysis/missingness/vaa_counts_labeled_bar.png"), width = 15, height = 5, dpi = 300)
+
+```
+
+
+#____________________________________________
+# caluculate missing scores from others
+### calculate missing logmar 
+```{r}
+
+## missing logmarod where acuit1ar? ######
+LOGMAR_mod <- lm(LOGMAR ~ ACUIT, data = d)
+
+summary(LOGMAR_mod)
+
+# plot them with calculated line
+plot(d$LOGMAR ~ d$ACUIT, main = "");abline(LOGMAR_mod, col = "blue", lwd = 3)
+
+
+# where to predict logmar
+where_acuit_not_logmar <- is.na(d$LOGMAR) & !is.na(d$ACUIT)
+
+# fix missing acuity scoress: calculate where acuity observed and logmar missing
+d$LOGMAR[where_acuit_not_logmar] <-   predict(LOGMAR_mod, data.frame(ACUIT = d$ACUIT[where_acuit_not_logmar] ))
+
+```
+
+### calculate missing snellen
+missing snellen where acuit?, predict snellen where acuity 
+```{r}
+
+# TRAIN MODELS----
+## model for left eye
+SNELL_formula <-
+  "SNELL ~ " %>% paste(., "+ I(10 ^ LOGMAR)") %>%
+  # "log10(SNELL) ~ " %>% paste(., "LOGMAR") %>%
+  as.formula()
+
+SNELL_mod <- lm(SNELL_formula, data = d)
+plot(10^(d$LOGMAR) , d$SNELL); add_lines("d", col = "black")
+abline(SNELL_mod, col = "blue", lty  = 5, lwd =3)
+legend("topleft", legend = paste(SNELL_formula[c(2,1,3)], collapse = " ") )
+
+# (((((((((((((((((())))))))))))))))))
+# fix missing acuity scores using model ----
+# (((((((((((((((((())))))))))))))))))
+
+# double check models
+test <- select(d, matches("SNELL|LOG")) %>% 
+  drop_na() %>% 
+  mutate(pred =predict(SNELL_mod,. )) %>% 
+  select(matches("pred|SNELL"))
+plot(test)
+  
+# where to predict snellen
+where_logmar_not_snell <- is.na(d$SNELL) & !is.na(d$LOGMAR)
+# predict using models
+d$SNELL[where_logmar_not_snell] <- predict(SNELL_mod, d[where_logmar_not_snell ,"LOGMAR" ] )
+
+
+
+```
+
+<!-- ### **re-plot non_missing counts bar plot  -->
+<!-- ```{r} -->
+
+
+<!-- vaa_count_df <- d %>%  -->
+<!--   select( all_of(c(info$variable_new[info$dataset == "VAA" & info$in_d], "month", "patID", "eye_num"))) %>%  -->
+<!--   group_by(month) %>%  -->
+<!--   summarise(across(everything(), ~ sum(!is.na(.)), .names = "{.col}")) %>%  -->
+<!--   melt(id.vars = "month") %>%  -->
+<!--   group_by(variable) %>%  -->
+<!--   mutate(var_total = sum(value)) %>%  -->
+<!--   ungroup() %>%  -->
+<!--   group_by(month) %>%  -->
+<!--   mutate(month_total = sum(value)) %>%  -->
+<!--   ungroup() -->
+
+<!-- # factor variable to have order of df -->
+<!-- vaa_count_df <- vaa_count_df %>%  -->
+<!--   mutate(variable = factor(variable, levels = count_plot_levels)  ) %>%  -->
+<!--   mutate(month_group = factor(ifelse(month > 0, "0<", "0"), levels  = c("0", "0<")) ) -->
+
+<!-- # vAA overall counts -->
+<!-- VAA_colsum_plot <-ggplot(vaa_count_df, aes(x = value ,y =variable , fill = variable))+ -->
+<!--   geom_bar(stat = "identity", show.legend = FALSE, orientation = "y", width = .5, just = 0)+ -->
+<!--   theme_light()+ -->
+<!--   # theme(axis.text.x = element_text( hjust = 1, vjust = 0, size = 10, angle = 90, -->
+<!--   #                                   margin = margin(t = -100, r = 0, b = 0, l = 0)  -->
+<!--   #                                   ) -->
+<!--   #       )+ -->
+<!--   geom_abline(intercept = nrow(d), col = "blue", linetype = 2, slope = 0)+ -->
+<!--   ggtitle("VAA available counts after derivations on logmar and snellen from acuity") -->
+
+<!-- ggsave(paste0(wd_path, "results/VAA_analysis/missingness/VAA_postCalc_colsum_plot.png"),VAA_colsum_plot, width = 15, height = 8, dpi = 200, limitsize = F) -->
+
+<!-- ### same plot but faceted for visitID #### -->
+<!-- VAA_colsum_facetVisit_plot <- ggplot(vaa_count_df, aes(y = variable ,x= value, fill = variable))+ -->
+<!--   geom_bar(stat = "identity", show.legend = FALSE, orientation = "y", width = .5, just = 0)+ -->
+<!--   theme_bw()+ -->
+<!--   # theme(axis.text.x = element_text( hjust = 1, vjust = 0, size = 4, angle = 90, -->
+<!--   #                                   margin = margin(t = 0, r = 0, b = 0, l = 0)  -->
+<!--   #                                   ) -->
+<!--   #       )+ -->
+<!--   geom_abline(intercept = nrow(d), col = "blue", linetype = 2, slope = 0)+ -->
+<!--   facet_wrap(~month_group, scales = "fixed")+ -->
+<!--   ggtitle("VAA available counts after derivations on logmar and snellen from acuity") -->
+<!-- ggsave(paste0(wd_path, "results/VAA_analysis/missingness/VAA_postCalc_colsum_facetVisit_plot.png"),VAA_colsum_facetVisit_plot, width = 15, height = 10, dpi = 200, limitsize = F) -->
+
+<!-- ``` -->
+
+#____________________________________________
+# clean VAA 
+
+## recode VAA vars
+```{r}
+
+d_new <- d
+
+prescrip_columns <- c("CYLPM","SPHPM")
+
+## fix prescrip
+d_new <- d_new %>% 
+  mutate(across(all_of(prescrip_columns), ~case_when(
+    . == "+" ~ 1, 
+    . == "-" ~ -1, 
+    . == "Plano" ~ 0, 
+    . == "No correction needed" ~ 0, 
+    TRUE ~ NA_real_
+  ))
+         )
+
+```
+
+# plot heatmap of VAA correlations
+```{r}
+
+
+VAA_vars <- info$name[!is.na(info$table) & info$table == "VAA"] %>% 
+  grep("DATE|TH|1$", ., value = TRUE, invert = TRUE)
+
+VAA_vars <- intersect(VAA_vars, names(d_new))
+
+# select VAA variables; exclude 1m rowscores
+vaa_m <- d_new %>% 
+  select(all_of(VAA_vars)) %>% 
+  ungroup()
+
+corr_m <- cor(vaa_m, method = "pearson", use = "pairwise.complete.obs") 
+
+# # make a filtered matrix for coloring
+# to each row set zero if outside [-threshold, threshold]
+# threshold = 0
+# corr_m_filtered <- apply(corr_m, 1, function(x){ ifelse(x>(-1*threshold) & x< threshold,0, x)})
+# corr_m_filtered <- apply(corr_m, 1, function(x){ if(x>(threshold * -1) & x < threshold) 0 else x })
+
+# par(mfrow = c(1, 2))
+# plot filtered matrix but label with original
+# gplots::heatmap.2(corr_m, 
+#                   Rowv = TRUE,
+#                   symm = TRUE,
+#                   hclustfun = function(x) hclust(x, method = "ward.D2"),
+#                   dendrogram = "row", 
+#                   Colv = TRUE, 
+#                   col =bluered,
+#                   margins = c(20, 15),
+#                   trace = "none", 
+#                   cellnote=corr_m, 
+#                   key = FALSE)
+
+png(sprintf("%sresults/VAA_analysis/VA_corr_hm.png", wd_path), height = 1000, width = 1000)
+Heatmap(corr_m,
+        column_title = "VAA Correlations", 
+        name = "r", 
+        cluster_rows = TRUE, 
+        cluster_columns = TRUE,
+        clustering_method_columns = "ward.D2",
+        clustering_method_rows = "ward.D2",
+        col = rev(c("red", "white", "blue"))
+        ) 
+dev.off()
+
+# gplots::heatmap.2(vaa_imp_corr_m, 
+#                   Rowv = TRUE,
+#                   symm = TRUE,
+#                   hclustfun = function(x) hclust(x, method = "ward.D2"),
+#                   dendrogram = "row", 
+#                   Colv = TRUE, 
+#                   col =bluered,
+#                   margins = c(20, 15),
+#                   trace = "none", 
+#                   cellnote=vaa_imp_corr_m,
+#                   key = FALSE)
+
+
+
+```
+
+#____________________________________________
+# impute VAA
+
+## look at potential vision improvement over time
+```{r}
+
+va_over_time <- d_new %>% 
+  select(patID_eye, month, matches("RW\\d.*4$")) %>%
+  arrange(patID_eye, month) %>%
+  group_by(patID_eye) %>% 
+  mutate(across(matches("RW"), 
+                ~.-dplyr::first(.))) %>% # normalize to BL
+  ungroup()%>% 
+  drop_na()
+
+# make long
+va_over_time_long <- va_over_time %>% 
+  # filter(if_any(matches("RW"), ~.!=lead(.) & .!=lag(.)), .by = patID_eye) %>% # filter for recoreds that mark change
+  # filter(patID_eye %in% va_improvers  ) %>% 
+  pivot_longer(-c(month,patID_eye)) 
+  
+ggplot(va_over_time_long,aes(month, value))+
+  geom_step( aes(group = patID_eye),color = "black", alpha = .1,show.legend = FALSE)+
+  # geom_line( aes(group = name),color = "black", alpha = .3, show.legend = FALSE)+
+  geom_smooth(aes(group = name), color = "darkorange")+
+  # geom_smooth(aes(color = name))+
+  facet_wrap(~name, scales = "free_x", ncol = 5)+
+  theme_bw()+
+  ggtitle("BL normalized row scores")+
+  theme(aspect.ratio = .8)+
+  geom_blank()
+
+ggsave(paste0(wd_path, "results/VAA_analysis/bl_norm_rowscores_over_time.png"), height = 5, width = 15)
+
+```
+
+
+
+## test impute data
+start by finding best method
+
+#### 'TRUE' to run imputation evaluation chunks
+```{r}
+#
+##
+###
+####
+run_test_imputes <- FALSE
+####
+###
+##
+#
+```
+
+
+### make df to test
+#### first make truth df
+
+```{r}
+#VAA_vars= "AXISA" "CYLPM" "SNELL" "SPHPM" "ACUIT"  "CYLNUMA" "LOGMAR" "RW014"  "RW024"  "RW034"  "RW044"  "RW054"  "RW064"  "RW074"  "RW084"  "RW094"  "RW104"  "RW114"  "RW124"  "RW134"  "RW144"  "SPHNUMA"
+# what rows have no na
+
+rows_to_impute <- rowSums(is.na(d_new[, VAA_vars])) ==0
+
+# complete df to test with excluding logmar because of collinearity
+truth <- d_new[rows_to_impute, ] %>%
+  select(all_of(VAA_vars)) %>% 
+  select(-LOGMAR) %>% 
+  as.matrix()
+
+```
+
+#### test dataframe randomly assigning NAs
+<!-- ```{r} -->
+<!-- # sample nas -->
+<!-- prop_na <- 0.2 -->
+<!-- # Calculate the number of NAs to introduce -->
+<!-- num_na <- ceiling(nrow(truth) * ncol(truth) * prop_na) -->
+
+<!-- # Create a vector of indices for the dataframe -->
+<!-- indices <- expand.grid(1:nrow(truth), 1:ncol(truth)) -->
+
+<!-- # Sample from these indices -->
+<!-- sampled_indices <- sample(1:nrow(indices), size = num_na, replace = FALSE) -->
+
+<!-- test <- truth -->
+<!-- # Assign NAs -->
+<!-- for (idx in sampled_indices) { -->
+<!--   test[indices[idx, 1], indices[idx, 2]] <- NA # at row column in test for row column of index df, set to NA -->
+<!-- } -->
+
+<!-- # look at missing -->
+<!-- row_na <- indices[sampled_indices, 1] %>% unique() -->
+<!-- col_na <- indices[sampled_indices, 2] %>% unique() -->
+
+<!-- test[row_na, ] -->
+<!-- truth[row_na, ] -->
+<!-- ``` -->
+
+
+
+#### make test df with whole rows missing from categories
+* three categories: prescription, row scores, overall scores
+
+```{r}
+#VAA_vars= "ACUIT"  "AXIS"   "CYLNUM" "CYLPM"  "LOGMAR" "RW014"  "RW024"  "RW034"  "RW044"  "RW054"  "RW064" "RW074"  "RW084"  "RW094"  "RW104"  "RW114"  "RW124"  "RW134"  "RW144"  "SNELL"  "SPHNUM" "SPHPM" 
+
+# sample nas
+prop_na <- 0.3
+
+# Calculate the number of NAs rows to introduce
+num_na <- ceiling(length(truth) * prop_na)
+
+# df to assign nas to
+test <- truth
+
+# sample missing as 1d inds
+inds_1d <- sample(seq(length(truth)), num_na )
+ 
+test[inds_1d] <- NA
+inds_2d <- which(is.na(test), arr.ind = TRUE)
+
+# # Create a vector of indices for the dataframe
+# ## sample rows from each category of truth so that no na rows overlap
+# prescrip_na_rows <- sample(1:nrow(truth), num_na, replace = FALSE)
+# RW_na_rows <- sample( setdiff(1:nrow(truth), prescrip_na_rows),num_na, replace = FALSE)
+# scores_na_rows <- sample( setdiff(1:nrow(truth), c(prescrip_na_rows, RW_na_rows)),num_na, replace = FALSE)
+# 
+# ## vectors of columns for each category
+# prescrip_na_cols <- grep("CYL|SPH|AXIS", VAA_vars, value = TRUE)
+# RW_na_cols <- grep("RW\\d", VAA_vars, value = TRUE)
+# scores_na_cols <- grep("ACUI|SNEL", VAA_vars, value = TRUE)
+# # setequal(c(prescrip_na_cols, RW_na_cols, scores_na_cols), VAA_vars)
+# 
+# # Assign NAs to row indices for respective category
+# test[prescrip_na_rows, prescrip_na_cols] <- NA
+# test[RW_na_rows, RW_na_cols] <- NA
+# test[scores_na_rows, scores_na_cols] <- NA
+
+## check if same number na in each
+# is.na(test[c(prescrip_na_rows), prescrip_na_cols ][1] ) %>% sum()
+# is.na(test[c(RW_na_rows), RW_na_cols][1]) %>% sum()
+# is.na(test[c(scores_na_rows), scores_na_cols][1]) %>% sum()
+# 
+
+```
+
+##### construct predictor matrix
+```{r}
+
+predictor_m <- matrix(0, ncol = ncol(test),nrow = ncol(test), dimnames = list(colnames(test), colnames(test)) )
+
+predictor_m[grep("RW|SNELL", colnames(predictor_m)), "ACUIT"] <-  1 # rw and snell log and acuit
+predictor_m[grep("RW|ACUIT", colnames(predictor_m)), "SNELL"] <-  1 # same
+predictor_m[grep("UMA|PMA|AXIS", colnames(predictor_m)), grep("UMA|PMA|AXIS", colnames(predictor_m))] <-  1 # prescriptions
+predictor_m[grep("RW", colnames(predictor_m)), grep("RW", colnames(predictor_m))] <-  1 # row scores with selff
+predictor_m[grep("RW0[4-9]|RW[10-14]", colnames(predictor_m)), grep("RW0[1-3]", colnames(predictor_m))] <-  0 # high rows not correlated to low
+
+# remove diagonal
+diag(predictor_m) <- 0
+
+# Heatmap(predictor_m)
+# qpred <- quickpred(test,mincor = .1, minpuc = .6)
+# Heatmap(qpred)
+
+```
+
+
+### PMM x pred matrix ####
+```{r}
+
+if(run_test_imputes){
+
+  method = "pmm"
+  pmm_no_PredM <- mice(test, method = method)
+  pmm_no_PredM_sum <- complete(pmm_no_PredM, action =1) ; for (i in 1:pmm_no_PredM$m){pmm_no_PredM_sum <-pmm_no_PredM_sum + complete(pmm_no_PredM, action =i )}
+  pmm_no_PredM_mean <- pmm_no_PredM_sum / pmm_no_PredM$m
+  pmm_no_PredM_mean <- data.matrix(pmm_no_PredM_mean)
+  #^ doesn't imput Logmar becasue of collinearity, assess snellen an acuity as proxy
+
+  pmm_PredM <- mice(test, method = method, predictorMatrix = predictor_m);
+  pmm_PredM_sum <- complete(pmm_PredM, action =1) ; for (i in 1:pmm_PredM$m){pmm_PredM_sum <-pmm_PredM_sum + complete(pmm_PredM, action =i )} ;
+  pmm_PredM_mean <- pmm_PredM_sum / pmm_PredM$m
+  pmm_PredM_mean <- data.matrix(pmm_PredM_mean)
+  #^ doesn't imput Logmar becasue of collinearity, assess snellen an acuity as proxy
+
+    rmse_d <- data.frame(var= character(), RMSE_1 = numeric(), RMSE_2 = numeric(), stringsAsFactors = FALSE)
+
+    # plot
+    h = 1500
+    w = 1700
+    png(paste0(wd_path, "results/VAA_analysis/imputation_testing/PMM_with_predMatrix.png"), height = h, width = w)
+    par(mfrow = c(6,7))
+    # n = "ACUIT"
+    for (n in colnames(truth)){
+      
+      # find inds of missing for column n
+      inds <- inds_2d[ inds_2d[,2] == which(colnames(truth) == n) ,]
+      
+      rmse_1 <- rmse(truth[inds] %>% scale(), pmm_no_PredM_mean[inds] %>% scale())
+      rmse_2 <- rmse(truth[inds]%>% scale(), pmm_PredM_mean[inds]%>% scale())
+      cor_1 <- cor(pmm_no_PredM_mean[inds], truth[inds])
+      cor_2 <- cor(pmm_PredM_mean[inds], truth[inds])
+
+      cex = 1
+      position <-range(pmm_no_PredM_mean[inds])[1] + (range(pmm_no_PredM_mean[inds])[2] -range(pmm_no_PredM_mean[inds]) [1])/ 2
+      if(position == 0){position = .4}
+      plot(pmm_no_PredM_mean[inds]~ truth[inds], col = "blue", main = paste("pmm, no predictor matrix\n", n)); abline(c(0, 1), col = "blue") ;
+      text(x = position, y = position, labels = paste("RMSE:", round(rmse_1, 2)), font = 2, cex = cex)
+      text(x = position, y = position-position/8, labels = paste("r:", round(cor_1, 2)), font = 2, cex = cex)
+
+      position <-range(pmm_PredM_mean[inds])[1] + (range(pmm_PredM_mean[inds])[2] -range(pmm_PredM_mean[inds]) [1])/ 2
+      if(position == 0){position = .4}
+
+      plot(pmm_PredM_mean[inds]~ truth[inds], col = "red", main = paste("pmm, predictor matrix for like variables\n", n)); abline(c(0, 1), col = "red")
+      text(x = position, y = position, labels = paste("RMSE:", round(rmse_2, 2)), font = 2, cex = cex)
+      text(x = position, y = position-position/8, labels = paste("r:", round(cor_2, 2)), font = 2, cex = cex)
+
+      rmse_d[n,] <- data.frame(var = n, RMSE_1= rmse_1, RMSE_2 =rmse_2)
+
+    }
+    dev.off()
+    par(mfrow = c(1,1))
+
+    c(wo_predM  = rmse_d$RMSE_1 %>% mean(., na.rm = TRUE) ,    with_predM= rmse_d$RMSE_2 %>% mean(., na.rm = TRUE) )
+      # wo_predM   with_predM
+      # 0.7470695  1.2763752
+      # wo_predM   with_predM 
+      # 1.248221   1.290610 
+      # wo_predM with_predM 
+      # 0.6376694  0.7539783 
+}
+```
+>> model doesn't impute Logmar becasue of collinearity, assess snellen and acuity as proxy
+>> => calculate logmar from acui after impute*
+
+<!-- ### lasso.norm x pred matrix #### -->
+<!-- ```{r} -->
+<!-- if(run_test_imputes){ -->
+
+<!--     method = "lasso.norm" -->
+
+<!--     lasso_no_PredM <- mice(test, method = method) -->
+<!--     lasso_no_PredM_sum <- complete(lasso_no_PredM, action =1) ; for (i in 1:lasso_no_PredM$m){lasso_no_PredM_sum <-lasso_no_PredM_sum + complete(lasso_no_PredM, action =i )} -->
+<!--     lasso_no_PredM_mean <- lasso_no_PredM_sum / lasso_no_PredM$m -->
+
+
+<!--     lasso_PredM <- mice(test, method = method, predictorMatrix = predictor_m); -->
+<!--     lasso_PredM_sum <- complete(lasso_PredM, action =1) ; for (i in 1:lasso_PredM$m){lasso_PredM_sum <-lasso_PredM_sum + complete(lasso_PredM, action =i )} ; -->
+<!--     lasso_PredM_mean <- lasso_PredM_sum / lasso_PredM$m -->
+
+<!--     # -->
+<!--     # n = "ACUIT" -->
+<!--     # -->
+
+<!--     rrmse_d <- data.frame(var= character(), RMSE_1 = numeric(), RMSE_2 = numeric(), stringsAsFactors = FALSE) -->
+
+<!--     # plot -->
+<!--     h = 1500 -->
+<!--     w = 1700 -->
+<!--     png(paste0(wd_path, "results/VAA_analysis/imputation_testing/lasso.norm_with_predMatrix.png"), height = h, width = w) -->
+<!--     par(mfrow = c(6,7)) -->
+<!--     # n = "ACUIT" -->
+<!--     for (n in colnames(truth)){ -->
+
+<!--       # find inds of missing for column n -->
+<!--       inds <- inds_2d[ inds_2d[,2] == which(colnames(truth) == n) ,] -->
+
+<!--       rmse_1 <- rmse(truth[inds] %>% scale(), lasso_no_PredM_mean[inds] %>% scale()) -->
+<!--       rmse_2 <- rmse(truth[inds]%>% scale(), lasso_PredM_mean[inds]%>% scale()) -->
+<!--       cor_1 <- cor(lasso_no_PredM_mean[inds], truth[inds]) -->
+<!--       cor_2 <- cor(lasso_PredM_mean[inds], truth[inds]) -->
+
+<!--       cex = 1 -->
+<!--       position <-range(lasso_no_PredM_mean[inds])[1] + (range(lasso_no_PredM_mean[inds])[2] -range(lasso_no_PredM_mean[inds]) [1])/ 2 -->
+<!--       if(position == 0){position = .4} -->
+<!--       plot(lasso_no_PredM_mean[inds]~ truth[inds], col = "blue", main = paste("lasso, no predictor matrix\n", n)); abline(c(0, 1), col = "blue") ; -->
+<!--       text(x = position, y = position, labels = paste("RMSE:", round(rmse_1, 2)), font = 2, cex = cex) -->
+<!--       text(x = position, y = position-position/8, labels = paste("r:", round(cor_1, 2)), font = 2, cex = cex) -->
+
+<!--       position <-range(lasso_PredM_mean[inds])[1] + (range(lasso_PredM_mean[inds])[2] -range(lasso_PredM_mean[inds]) [1])/ 2 -->
+<!--       if(position == 0){position = .4} -->
+
+<!--       plot(lasso_PredM_mean[inds]~ truth[inds], col = "red", main = paste("lasso, predictor matrix for like variables\n", n)); abline(c(0, 1), col = "red") -->
+<!--       text(x = position, y = position, labels = paste("RMSE:", round(rmse_2, 2)), font = 2, cex = cex) -->
+<!--       text(x = position, y = position-position/8, labels = paste("r:", round(cor_2, 2)), font = 2, cex = cex) -->
+
+<!--       rmse_d[n,] <- data.frame(var = n, RMSE_1= rmse_1, RMSE_2 =rmse_2) -->
+
+<!--     };par(mfrow = c(1,1)) -->
+<!--     dev.off() -->
+
+<!--     c(lassoNorm_wo_predM = rmse_d$RMSE_1 %>% mean(., na.rm = TRUE), lassoNor_w_predM = rmse_d$RMSE_2 %>% mean(., na.rm = TRUE) ) -->
+<!--     # lassoNorm_wo_predM   lassoNor_w_predM -->
+<!--     #      0.7529663          1.2702938 -->
+<!--     # lassoNorm_wo_predM   lassoNor_w_predM -->
+<!--     #      0.9423242          1.1695645 -->
+<!-- } -->
+<!-- ``` -->
+
+
+### lasso.norm x PMM ####
+```{r}
+if(run_test_imputes){
+
+   method = c("pmm", "lasso.norm")
+
+    pmm_imp <- mice(test, method = method[1])
+    pmm_imp_sum <- complete(pmm_imp, action =1) ; for (i in 1:pmm_imp$m){pmm_imp_sum <-pmm_imp_sum + complete(pmm_imp, action =i )}
+    pmm_imp_mean <- pmm_imp_sum / pmm_imp$m
+
+    names(test)[map(test , ~var(.x, na.rm = TRUE))<.5]
+    
+    lasso_imp <- mice(test, method = method[2]);
+    lasso_imp_sum <- complete(lasso_imp, action =1) ; for (i in 1:lasso_imp$m){lasso_imp_sum <-lasso_imp_sum + complete(lasso_imp, action =i )} ;
+    lasso_imp_mean <- lasso_imp_sum / lasso_imp$m
+
+
+    rmse_d <- data.frame(var= character(), RMSE_1 = numeric(), RMSE_2 = numeric(), stringsAsFactors = FALSE)
+
+    # plot
+    h = 1500
+    w = 1700
+    png(paste0(wd_path, "results/VAA_analysis/imputation_testing/lassoNorm_x_PMM.png"), height = h, width = w)
+    par(mfrow = c(6,7))
+    # n = "ACUIT"
+    for (n in colnames(truth)){
+      
+      # find inds of missing for column n
+      inds <- inds_2d[ inds_2d[,2] == which(colnames(truth) == n) ,]
+      
+      rmse_1 <- rmse(truth[inds] %>% scale(), pmm_imp_mean[inds] %>% scale())
+      rmse_2 <- rmse(truth[inds]%>% scale(), lasso_imp_mean[inds]%>% scale())
+      cor_1 <- cor(pmm_imp_mean[inds], truth[inds])
+      cor_2 <- cor(lasso_imp_mean[inds], truth[inds])
+
+      cex = 1
+      position <-range(pmm_imp_mean[inds])[1] + (range(pmm_imp_mean[inds])[2] -range(pmm_imp_mean[inds]) [1])/ 2
+      if(position == 0){position = .4}
+      plot(pmm_imp_mean[inds]~ truth[inds], col = "blue", main = paste("pmm, no predictor matrix\n", n)); abline(c(0, 1), col = "blue") ;
+      text(x = position, y = position, labels = paste("RMSE:", round(rmse_1, 2)), font = 2, cex = cex)
+      text(x = position, y = position-position/8, labels = paste("r:", round(cor_1, 2)), font = 2, cex = cex)
+
+      position <-range(lasso_imp_mean[inds])[1] + (range(lasso_imp_mean[inds])[2] -range(lasso_imp_mean[inds]) [1])/ 2
+      if(position == 0){position = .4}
+
+      plot(lasso_imp_mean[inds]~ truth[inds], col = "red", main = paste("lasso.norm, no predictor matrix\n", n)); abline(c(0, 1), col = "red")
+      text(x = position, y = position, labels = paste("RMSE:", round(rmse_2, 2)), font = 2, cex = cex)
+      text(x = position, y = position-position/8, labels = paste("r:", round(cor_2, 2)), font = 2, cex = cex)
+
+      rmse_d[n,] <- data.frame(var = n, RMSE_1= rmse_1, RMSE_2 =rmse_2)
+
+
+    };par(mfrow = c(1,1))
+    dev.off()
+
+    rmse_d$RMSE_1 %>% mean(., na.rm = TRUE) # 0.6529529
+    rmse_d$RMSE_2 %>% mean(., na.rm = TRUE) # 0.7583347
+}
+```
+>> pmm good 
+
+
+### PMM over different num_iterations ####
+```{r}
+
+if(run_test_imputes){
+
+    method = "pmm"
+    rmse_d <- data.frame(iteration = integer(), var= character(), RMSE_1 = numeric(), stringsAsFactors = FALSE)
+
+    # loop over m iter and impute, loop over cols and calculate rmse with true
+    if(FALSE){
+
+      for ( iter_n in seq(5,30, 2)){
+          pmm_iter_imp <- mice(test, method = method, m = iter_n)
+          pmm_iter_imp_sum <- complete(pmm_iter_imp, action =1) ; for (i in 1:pmm_iter_imp$m){pmm_iter_imp_sum <-pmm_iter_imp_sum + complete(pmm_iter_imp, action =i )}
+          pmm_iter_imp_mean <- pmm_iter_imp_sum / pmm_iter_imp$m
+          
+          pmm_iter_imp_mean <- as.matrix(pmm_iter_imp_mean)
+
+          rmse_1 <- rmse( truth[inds_1d], pmm_iter_imp_mean[inds_1d])
+
+          rmse_d <-rmse_d %>%
+                rbind(., data.frame(iteration = i, RMSE_1= rmse_1))
+      }
+
+    saveRDS(rmse_d, paste0(wd_path, "processed_data/vaa_rmse_iter.rds"))
+
+    }
+
+
+    rmse_d <- readRDS(paste0(wd_path, "processed_data/vaa_rmse_iter.rds"))
+
+    # ggplot(rmse_d , aes( iteration, RMSE_1, color = var))+
+    #   geom_smooth(se = FALSE)+
+    #   scale_x_continuous(breaks = seq(5, 30, 1))
+
+    ggplot(rmse_d, aes( iteration, RMSE_1))+
+      geom_smooth(se = FALSE)+
+      # geom_smooth(se = FALSE, aes(color = var))+
+      # geom_line(aes(color = var))+
+      scale_x_continuous(breaks = seq(5, 30, 1))+
+      ggtitle("RMSE across vars over different iteration numbers for VAA imputation")
+    ggsave(paste0(wd_path, "results/VAA_analysis/imputation_testing/RMSE_iterations.png"), height = 10, width= 8)
+}
+
+```
+>> ~19 iterations optimizes
+
+
+### plot actual versus predicted for pmm at 16 iterations with categorized na test df
+```{r}
+
+if(run_test_imputes){
+    h = 1500
+    w = 1700
+    print("pmm")
+    pmm_at_iter <- mice(test, method = "pmm", m = 19, )
+    pmm_at_iter_sum <- complete(pmm_at_iter, action =1)
+    for (i in 1:pmm_at_iter$m){pmm_at_iter_sum <-pmm_at_iter_sum + complete(pmm_at_iter, action =i )}
+    pmm_at_iter_mean <- pmm_at_iter_sum / pmm_at_iter$m
+
+    rmse_d <- data.frame(variable= character(), RMSE = numeric(), stringsAsFactors = FALSE)
+    cor_d <- data.frame(variable= character(), R = numeric(), p_value = numeric(), stringsAsFactors = FALSE)
+    
+    png(paste0(wd_path, "results/VAA_analysis/imputation_testing/PMM_at_iter.png"), height = h/2, width = w)
+
+    par(mfrow = c(3,7))
+    for (n in colnames(truth)){
+      
+      # find inds of missing for column n
+      inds <- inds_2d[ inds_2d[,2] == which(colnames(truth) == n) ,]
+      
+      rmse <- rmse(truth[inds] %>% scale(), pmm_at_iter_mean[inds] %>% scale())
+      corr_test <- cor.test(pmm_at_iter_mean[inds], truth[inds])
+      corr <- as.numeric(corr_test$estimate)
+
+      cex = 1
+      position <-range(pmm_at_iter_mean[inds])[1] + (range(pmm_at_iter_mean[inds])[2] -range(pmm_at_iter_mean[inds]) [1])/ 2
+      if(position == 0){position = .4}
+      plot(pmm_at_iter_mean[inds]~ truth[inds], col = "blue", 
+           main = sprintf("pmm, 19 iterations\nR=%f\nRMSE=%f\n%s", corr, rmse, n)
+           )
+      abline(c(0, 1), col = "blue") ;
+      # text(x = position, y = position, labels = paste("RMSE:", round(rmse, 2)), font = 2, cex = cex)
+      # text(x = position, y = position-position/8, labels = paste("r:", round(cor, 2)), font = 2, cex = cex)
+
+      rmse_d[n,] <- data.frame(variable = n, RMSE = rmse)
+      # make df of spectralis x avg correlation
+      cor_d[n,] <- data.frame(variable = n, R=as.numeric(corr_test$estimate), p_value = corr_test$p.value)
+
+
+    }
+    par(mfrow = c(1,1))
+    dev.off()
+    
+    # save correlations to cors folder
+    if(!dir.exists(sprintf("%sprocessed_data/imputation_Rs/", wd_path))) dir.create(sprintf("%sprocessed_data/imputation_Rs/", wd_path))
+    write_csv(cor_d, sprintf("%sprocessed_data/imputation_Rs/VAA_imputation_correlations.csv", wd_path))
+
+}
+
+
+
+
+```
+
+#___
+## Actual imputation
+### TRUE to do VAA imputation on working d
+```{r}
+#
+##
+###
+####
+#####
+impute <- TRUE
+#####
+####
+###
+##
+#
+```
+
+### impute
+```{r}
+
+# row inds where less than ratio of columns are missing for each row
+rows_to_impute <- rowSums(is.na(d_new[, VAA_vars])) < floor(length(VAA_vars)*.75) # 25% of columns must be non missing for each row
+
+# data to feed into mice: has < ncols of NAs in each row and only VAA cols
+d_new[, VAA_vars] <-  d_new[, VAA_vars] %>%
+ mutate_all(~as.numeric(.))
+
+if(impute){
+  set.seed(19462)
+  # impute!
+  impute_input <- d_new[rows_to_impute, VAA_vars]
+  vaa_imp <- mice(impute_input, method = "pmm", m = 19)
+  saveRDS(vaa_imp, file = paste0(wd_path, "processed_data/vaa_columns_imputed_01.rds"))
+}
+
+vaa_imp <- readRDS(paste0(wd_path, "processed_data/vaa_columns_imputed_01.rds"))
+
+vaa_imp_sum <- complete(vaa_imp, action =1) 
+for (i in 1:vaa_imp$m){vaa_imp_sum <-vaa_imp_sum + complete(vaa_imp, action =i )} 
+vaa_imp_mean <- vaa_imp_sum / vaa_imp$m
+
+# replace missing with imputed in a new df
+d_newest <- d_new
+d_newest[rows_to_impute , VAA_vars ] <-  vaa_imp_mean
+
+d_newest[,VAA_vars] %>% na.omit() %>% dim() - d_new[,VAA_vars]  %>% na.omit() %>% dim() # ~ 9000 more , 2x more! >> 5496 >> 6110
+
+```
+
+
+### calculate logmar from Acuity where acuity available or vice versa (depends on what mice throws out due to collinearity)
+```{r}
+
+acuit <- d_newest$ACUIT
+logmar <- d_newest$LOGMAR
+ACUIT_by_LOGMAR_mod <- lm(ACUIT ~ LOGMAR, data = d_newest)
+ACUIT_by_LOGMAR_mod %>% summary()
+
+
+plot( d_newest$ACUIT~d_newest$LOGMAR, type = "n")
+abline(ACUIT_by_LOGMAR_mod, col = rgb(0,.4,1,.8), lwd = 4, lty = 3)
+points(d_newest$ACUIT~d_newest$LOGMAR, col = ifelse(!is.na(d_newest$ACUIT) & is.na(d_new$ACUIT), "red", "black"))
+
+# calculate missing Logmar where acuity
+where_logmar_not_acuit <- is.na(d_newest$ACUIT) & !is.na(d_newest$LOGMAR)
+d_newest$ACUIT[where_logmar_not_acuit] <- predict(ACUIT_by_LOGMAR_mod, data.frame(LOGMAR = d_newest$LOGMAR[where_logmar_not_acuit]))
+
+```
+
+### fix prescriptions that should be discrete
+```{r}
+
+# imputation made these variables more continuous so making them 1,0,or -1 
+d_newest <- d_newest %>% 
+  mutate(across(all_of(matches("PM")), 
+                  ~round(.)
+                )
+  ) 
+
+```
+
+
+<!-- #### VAA na counts after imputation and re-calculation -->
+
+<!-- ```{r} -->
+
+<!-- vaa_count_df <- d_newest %>% -->
+<!--   select( patID_eye, month, all_of(VAA_vars)) %>% -->
+<!--   group_by(month) %>% -->
+<!--   summarise(across(everything(), ~ sum(!is.na(.)), .names = "{.col}")) %>% -->
+<!--   reshape2::melt(id.vars = "month") %>% -->
+<!--   group_by(variable) %>% -->
+<!--   mutate(var_total = sum(value)) %>% -->
+<!--   ungroup() %>% -->
+<!--   group_by(month) %>% -->
+<!--   mutate(month_total = sum(value)) %>% -->
+<!--   ungroup() -->
+
+<!-- ## factor variable to have order of df -->
+<!-- # order variables to go acuity scores then other -->
+<!-- count_plot_levels <-  unique(vaa_count_df$variable[order(vaa_count_df$var_total)]) -->
+<!-- last <- grep("ACUIT|LOGMAR|SNELL", count_plot_levels, value = TRUE) -->
+<!-- count_plot_levels <- grep("ACUIT|LOGMAR|SNELL", count_plot_levels, value = TRUE, invert = TRUE) -->
+<!-- count_plot_levels <- c(count_plot_levels, last) -->
+
+<!-- vaa_count_df <- vaa_count_df %>% -->
+<!--   mutate(variable = factor(variable, levels = count_plot_levels  ) )%>% -->
+<!--   mutate(month_group = factor(ifelse(month > 0, "0<", "0"), levels  = c("0", "0<")) ) -->
+
+<!-- # vAA overall counts -->
+<!-- VAA_colsum_plot <-ggplot(vaa_count_df, aes(x = value ,y =variable , fill = variable))+ -->
+<!--   geom_bar(stat = "identity", show.legend = FALSE, orientation = "y", width = .5, just = 0)+ -->
+<!--   theme_light()+ -->
+<!--   # theme(axis.text.x = element_text( hjust = 1, vjust = 0, size = 10, angle = 90, -->
+<!--   #                                   margin = margin(t = -100, r = 0, b = 0, l = 0) -->
+<!--   #                                   ) -->
+<!--   #       )+ -->
+<!--   geom_abline(intercept = nrow(d), col = "blue", linetype = 2, slope = 0)+ -->
+<!--   ggtitle("VAA available counts") -->
+
+<!-- ggsave(paste0(wd_path, "results/VAA_analysis/missingness//VAA_colsum_plot_postImputation.png"),VAA_colsum_plot, width = 15, height = 8, dpi = 150, limitsize = F) -->
+
+<!-- ### same plot but faceted for visitID #### -->
+<!-- VAA_colsum_facetVisit_plot <- ggplot(vaa_count_df, aes(y = variable ,x= value, fill = variable))+ -->
+<!--   geom_bar(stat = "identity", show.legend = FALSE, orientation = "y", width = .5, just = 0)+ -->
+<!--   theme_bw()+ -->
+<!--   # theme(axis.text.x = element_text( hjust = 1, vjust = 0, size = 1.5, angle = 90, -->
+<!--   #                                   margin = margin(t = 0, r = 0, b = 0, l = 0) -->
+<!--   #                                   ) -->
+<!--   #       )+ -->
+<!--   geom_abline(intercept = nrow(d), col = "blue", linetype = 2, slope = 0)+ -->
+<!--   facet_wrap(~month_group, scales = "fixed")+ -->
+<!--   ggtitle("VAA available counts") -->
+<!-- ggsave(paste0(wd_path, "results/VAA_analysis/missingness//VAA_colsum_facetVisit_plot_postImputation.png"),VAA_colsum_facetVisit_plot, width = 20, height = 15, dpi = 400, limitsize = F) -->
+<!-- ``` -->
+
+#### barplot of all columns after imputation and recalculation
+```{r}
+
+count_df <- d_newest %>%
+  group_by(month) %>%
+  summarise(across(everything(), ~ sum(!is.na(.)))
+            ) %>% #, .names = "{.col}")) %>%
+  reshape2::melt(id.vars = "month") %>%
+  group_by(variable) %>%
+  mutate(var_total = sum(value)) %>%
+  ungroup() %>%
+  group_by(month) %>%
+  mutate(month_total = sum(value)) %>%
+  ungroup()
+
+## factor variable to have order of df
+# order variables to go acuity scores then other
+count_plot_levels <-  unique(count_df$variable[order(count_df$var_total)])
+# last <- grep("ACUIT|LOGMAR|SNELL", count_plot_levels, value = TRUE)
+# count_plot_levels <- grep("ACUIT|LOGMAR|SNELL", count_plot_levels, value = TRUE, invert = TRUE)
+# count_plot_levels <- c(count_plot_levels, last)
+
+count_df <- count_df %>%
+  # mutate(variable = factor(variable, levels = count_plot_levels  ) )%>%
+  mutate(month_group = factor(ifelse(month > 0, ">0", "0"), levels  = c("0", ">0")) )
+
+# vAA overall counts
+colsum_plot <-ggplot(count_df, aes(x = value ,y =variable , fill = variable))+
+  geom_bar(stat = "identity", show.legend = FALSE, orientation = "y", width = .5, just = 0)+
+  theme_light()+
+  # theme(axis.text.x = element_text( hjust = 1, vjust = 0, size = 10, angle = 90,
+  #                                   margin = margin(t = -100, r = 0, b = 0, l = 0)
+  #                                   )
+  #       )+
+  geom_abline(intercept = nrow(d), col = "blue", linetype = 2, slope = 0)+
+  ggtitle("All variables available counts")
+
+ggsave(paste0(wd_path, "results/VAA_analysis/missingness//colsum_plot_postImputation.png"),colsum_plot, width = 25, height = 20, dpi = 300, limitsize = F)
+
+### same plot but faceted for visitID ####
+colsum_facetVisit_plot <- ggplot(count_df, aes(y = variable ,x= value, fill = variable))+
+  geom_bar(stat = "identity", show.legend = FALSE, orientation = "y", width = .5, just = 0)+
+  theme_bw()+
+  # theme(axis.text.x = element_text( hjust = 1, vjust = 0, size = 1.5, angle = 90,
+  #                                   margin = margin(t = 0, r = 0, b = 0, l = 0)
+  #                                   )
+  #       )+
+  geom_abline(intercept = nrow(d), col = "blue", linetype = 2, slope = 0)+
+  facet_wrap(~month_group, scales = "fixed")+
+  ggtitle("All variables available counts")
+
+ggsave(paste0(wd_path, "results/VAA_analysis/missingness//colsum_facetVisit_plot.png"), colsum_facetVisit_plot, width = 20, height = 15, dpi = 400, limitsize = F)
+```
+
+#____________________________________________
+# factor analysis of VAA
+### check for high correlations
+```{r}
+
+d_newest_all_available_VA <-d_newest %>%
+  select(all_of(VAA_vars)) %>% 
+  na.omit()
+
+
+Heatmap(cor(d_newest_all_available_VA, use = "complete.obs"), 
+            row_dend_width = unit(3, "cm"),
+            column_dend_height = unit(3, "cm"), 
+        name =  "r") 
+
+m <-cor(d_newest_all_available_VA)
+rownames(m) <- colnames(m)
+
+# remove noise make strong relationships stronger and weak weaker
+Heatmap((m^2)*sign(m))
+
+### metrics
+KMO(d_newest_all_available_VA) # MSA = .86
+MSA <- KMO(d_newest_all_available_VA)$MSAi
+
+# barplot of msas
+msa_d <- data.frame(value = MSA) %>% 
+  rownames_to_column("var") %>% 
+  mutate(var = factor(var, levels = var[order(value)] ))
+
+msa_cutoff <- .65
+ggplot(msa_d, aes(value,var,  fill = var))+
+  geom_bar(stat = "identity", show.legend = FALSE) +
+  geom_vline(xintercept = msa_cutoff, linetype = 2, alpha = .5)+
+  scale_x_continuous(breaks = c(msa_cutoff,seq(0, 100, .25)))+
+  ggtitle("MSA scores for VAA variables")
+# # * 0.00 to 0.49 unacceptable
+# # * 0.50 to 0.59 miserable
+# # * 0.60 to 0.69 mediocre
+# # * 0.70 to 0.79 middling
+# # * 0.80 to 0.89 meritorious
+# # * 0.90 to 1.00 marvelous
+  
+# filter for MSA msa_cutoff
+good_msa_vars <- names(MSA)[MSA>=msa_cutoff]
+d_newest_all_available_VA_filt <- d_newest_all_available_VA[,good_msa_vars]
+# KMO(d_newest_all_available_VA_filtered) # MSA = .73
+# ^ overall and individual MSA better keeping those corelated factors
+
+# screes of filtering for vars and not 
+par(mfrow = c(2,1))
+# scree(d_newest_all_available_VA_filt, main = "filtered")
+# scree(d_newest_all_available_VA, main = "unfiltered")
+fa.parallel(d_newest_all_available_VA_filt, fa="fa", main = "filtered")
+fa.parallel(d_newest_all_available_VA, fa="fa", main = "unfiltered")
+par(mfrow = c(1,1))
+
+```
+> filtering out low MSA (prescriptional variables) suggests that there are 3-4 pcs/factors that describe this data
+
+### optimize FA
+```{r}
+
+
+
+# what rows have all not NA for columns having MSA> cutoff
+rows_complete <- rowSums(is.na(d_newest[,good_msa_vars])) == 0
+
+Nfacs <- 4
+
+# run FA on filtered full va vars
+oblimin <- fa(d_newest[rows_complete, good_msa_vars], Nfacs, rotate="oblimin" ) 
+# ^ lots of warnings: not ideal but ok
+
+# loadings of varas on factors
+oblimin_loads <- oblimin$loadings
+
+# look at how transform loadings for plotting
+oblimin_loads_trnsfm <- oblimin_loads %>% 
+  {(abs(.)^2.5) * sign(.)} 
+
+par(mfrow = c(2,2))
+for(i in 1:4){
+  x <- data.frame(cbind(fac = oblimin_loads[,i, drop = T],fac_transformed= oblimin_loads_trnsfm[,i, drop = T]))
+  x <- x[order(x[,1]) , ]
+  # x <- scale(x)
+  plot(x, type = "b")
+  add_lines()
+}
+par(mfrow = c(1,1))
+
+# plot fa diagram 
+png(paste0(wd_path, "results/VAA_analysis/FA/FA_diagrams.png"), height = 1000, width = 1000)
+par(mfrow = c(2,1))
+plot(oblimin_loads[,c("MR1","MR2")],type="n", xlim = c(-1, 1), ylim = c(-1, 1), main = "oblimin"); text(oblimin_loads,labels=names(d_newest[rows_complete, names(MSA)[MSA>msa_cutoff]]),cex=.7); abline(h = c(0), v = c(0), lty = 3)
+fa.diagram(oblimin, simple = TRUE)
+par(mfrow = c(1,1), mar = rep(3,4))
+dev.off()
+
+```
+>> mr better metrics than pa
+>> with two factors, second factor overlaps with first, expected because oblimin allows correlations between factors
+>> keeping teh correlated variables increases variance captured 
+>> factors load negatively with Logmar and snellen, ∴ positive loading ∝ better vision
+
+## run FA
+```{r}
+
+lamda <-function(x, lamda = NULL){
+  if(is.null(lamda)){
+    print("please enter lamda scaling factor")
+  }else{
+    (abs(x)^lamda) * sign(x)
+  }
+} 
+
+n_factors <- 4
+  
+fit <- fa(d_newest[rows_complete, names(MSA)[MSA>msa_cutoff]], nfactors = n_factors, rotate="oblimin", residuals = FALSE)
+
+# look at factor distributions
+for(i in 1:ncol(fit$scores)){
+  b <- fit$scores[,i]
+  b <- scale(b)
+  # b <- lamda(b, .9)
+  
+  if(i == 1){
+    plot(density(b, na.rm = TRUE), col = rgb(.1,0,0,.4), ylim = c(0,3))
+  }else{
+    lines(density(b, na.rm = TRUE), col = rgb(.1,0,0,.4))
+  }
+}
+
+# scale factors
+factors <- fit$scores %>%
+  scale() %>% 
+  as.data.frame() 
+# rename them
+names(factors) <- names(factors) %>% 
+  gsub("\\D+", "FA", .)
+
+subject_factors <- cbind( d_newest[rows_complete , "sample"] ,factors)
+
+d_newest[, grep("^FA\\d$", names(d_newest))] <- NULL
+d_newest <- d_newest %>%
+  left_join(., subject_factors)
+
+```
+
+### heatmap of loadings and corr with vars
+```{r}
+
+# loadings Heatmap
+png(paste0(wd_path, "results/VAA_analysis/FA/", n_factors, "_FA_loadings_heatmap.png"), height = 1000, width = 1000)
+Heatmap(oblimin_loads)
+dev.off()
+
+
+# look at what factor correlates to
+d_newest_cor <-cor(d_newest[ , c(good_msa_vars, grep("FA\\d", names(d_newest), value = TRUE) )  ], use = "complete.obs") # corr on vaa cols
+rownames(d_newest_cor) <- colnames(d_newest_cor)
+
+png(paste0(wd_path, "results/VAA_analysis/FA/", n_factors, "_FA_corr_vars_heatmap.png"), height = 1000, width = 1000)
+Heatmap(d_newest_cor, 
+        row_dend_width = unit(6, "cm"),
+        column_dend_height = unit(6, "cm"), 
+        name = "r",
+        row_names_gp = gpar(fontsize = 15),
+        column_names_gp = gpar(fontsize = 15)
+        ) 
+dev.off()
+
+
+```
+
+# Remove prescriptional vars
+```{r}
+
+d_newest <-d_newest %>%
+  select(-matches("CYL|SPH|AXIS"))
+
+```
+
+
+#|||||||||||||||||||||
+# Save data
+```{r}
+# D
+new_data_name <- data_name %>% 
+  gsub("5", "6", .)
+print(paste("Saving... ", new_data_name))
+saveRDS(d_newest, paste0(wd_path, "processed_data/", new_data_name))
+
+# # info
+# new_info_path <- info_path %>% gsub("_04", "_05", .)
+# 
+# write.xlsx(info, new_info_path)
+
+
+```
+
+```{r}
+check_dims(d_newest)
+# dims : 12600 289
+# n_patIDs             3693
+# n_patID_eyes         7386
+# n_observations      12600
+# n_patIDs_w_gr_1_vis   516
+# ^  no changes
+
+### MARCH 17 2025 ###
+# dims : 12619 310
+# n_patIDs             4034
+# n_patID_eyes         8063
+# n_observations      12617
+# n_patIDs_w_gr_1_vis   500
+
+```
+

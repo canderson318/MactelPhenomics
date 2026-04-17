@@ -1,0 +1,2472 @@
+---
+title: "09_clustering"
+author: "Christian Anderson"
+date: "`r Sys.Date()`"
+output: html_document
+---
+# options
+```{r}
+# dev.off()  # Turn off the current graphics device
+# options(device = "RStudioGD")
+# quartz()
+
+
+
+```
+
+# Packages
+```{r, message=FALSE, warning=FALSE, results='hide', echo = TRUE}
+
+pacman::p_load(tidyr,dplyr,reshape2,purrr,GGally,tidyverse,ggpubr,vcd,ggplot2,tidytext,gridExtra,ComplexHeatmap,zoo,mgcv,car,zoo,tools,mice,grDevices,ggrepel,grid,gplots,Metrics,stats,lme4,lmerTest,dendextend,magick,umap,scater,SingleCellExperiment,scran,bluster,slingshot,ggfortify,pheatmap,TSCAN,igraph,knitr, qs, patchwork, parallel,txtplot, HDF5Array)
+
+rm(list = ls())
+gc()
+```
+
+# functions
+```{r}
+
+source("/Users/canderson/Documents/LMRI/PRJ2024001/version015/analysis/00_MyFunctions.R")
+
+```
+
+
+# Load Data
+
+```{r, message=FALSE, warning=FALSE, results='hide', echo = TRUE}
+
+wd_path = "~/Documents/LMRI/PRJ2024001/version015/"
+
+
+sce <- HDF5Array::loadHDF5SummarizedExperiment(sprintf("%sprocessed_data/sce001.h5", wd_path))
+
+```
+
+## mung data
+
+### update rowdata
+```{r}
+
+
+# rowData(sce) %>%
+#   as.data.frame() %>%
+#   select(name:description) %>%
+#   filter(if_any(everything(),is.na))
+
+# add description to mt
+rowData(sce)$table_description[grepl("MT0\\d$", rowData(sce)$name)] <- "OCTMT"
+
+# add description to isos_loc
+rowData(sce)$description[grepl("ISOS_LOC", rowData(sce)$name)] <- "Juxtafoveal/central inner-segment/outer-segment break"
+
+# add description to isos_loc
+rowData(sce)$table_description[grepl("ISOS_LOC", rowData(sce)$name)] <- "OCTMAIN"
+
+```
+
+### update colData
+```{r}
+
+# add original missingness to coldata
+msngns_ratio <- colSums(is.na(assays(sce)$measure_vars))/ nrow(assays(sce)$measure_vars)
+txtplot::txtdensity(msngns_ratio, pch = '˙', height= 20, xlab = "Sample Missingness")
+txtplot::txtboxplot(msngns_ratio, width = 49, legend = TRUE)
+#   +----+-----------+------------+-----------+-----------+------------+------------+
+#    |   ˙                                                                           |
+# 30 +   ˙˙                                                                          +
+#    |    ˙                                                                          |
+#    |    ˙                                                                          |
+#    |    ˙                                                                          |
+#    |     ˙                                                                         |
+# 20 +     ˙                                                                         +
+#    |     ˙                                                                         |
+#    |     ˙                                                                         |
+#    |      ˙                                                                        |
+#    |      ˙                                                                        |
+# 10 +      ˙                                                                        +
+#    |       ˙                                                                       |
+#    |       ˙                         ˙˙˙˙                                          |
+#    |        ˙˙     ˙˙˙˙˙˙˙˙        ˙˙˙  ˙˙˙˙˙˙˙˙˙                                  |
+#  0 +         ˙˙˙˙˙˙˙      ˙˙˙˙˙˙˙˙˙˙            ˙˙˙˙˙˙˙˙˙˙˙˙˙˙˙˙˙˙˙˙˙˙˙˙˙˙˙˙˙˙˙    +
+#    +----+-----------+------------+-----------+-----------+------------+------------+
+#       0.05         0.1         0.15         0.2        0.25          0.3            
+#                                   Sample Missingness                                
+
+#       0.05         0.1        0.15         0.2       
+#      |--+-----------+-----------+-----------+-------|
+#        +----------------+                            
+#     1  |                |------------------------    
+#        +----------------+                        
+
+all(colnames(assays(sce)$measure_vars)==rownames(colData(sce)))
+# ^ TRUE
+
+# add to colData
+colData(sce) <- cbind(colData(sce), msngns_ratio)
+
+
+# add sample to colData
+colData(sce)$sample <- rownames(colData(sce))
+
+```
+
+### fix CTR pt vars names
+```{r}
+
+old <- grep("CTR", rownames(sce), value = TRUE)
+
+rowData(sce) %>% 
+  as.data.frame() %>% 
+  filter(name %in% old) %>% 
+  select(name, description) 
+
+name_change <- setNames(c("LARGEAREA_DECR_AF_CTR_PT_INVOLV",'INR_EMPTY_SPC_CTR_PT_INVOLV','OUTR_EMPTYSPC_CTR_PT_INVOLV'), c("CTR_PT_INVOLV",    "CTRPOINT_INVOLVD","CTRPOINT_INVOL_2"))
+  
+# corr <- assays(sce)$pmm_imp_of_scaled %>% 
+#   as.matrix() %>% 
+#   t() %>% 
+#   cor()
+# 
+# corr[!grepl("CTR", colnames(corr)), grepl("CTR", colnames(corr))] %>% 
+#   {(abs(.)^3)*sign(.)} %>% 
+#   Heatmap()
+# 
+# rowData(sce) %>% 
+#   as.data.frame() %>% 
+#   filter(grepl("AF|IN|OUTR",name) )
+
+rownames(sce)[match(names(name_change), rownames(sce))] <- name_change
+
+
+```
+
+
+
+#___
+# Clustering
+## KMEANS then NN
+```{r}
+
+# using kmeans then graph nn methods ----------
+## OG seed = 43933; centers = 1e3; k = 7
+# 
+# # original
+# set.seed(43933)
+# km_nn <- clusterCells(sce, use.dimred="PCA",
+#     BLUSPARAM=TwoStepParam(
+#         first=KmeansParam(centers=1e3),
+#         second=NNGraphParam(k=7)
+#     ), full = TRUE
+# )
+
+## for when 2 ISOS_LOC vars :: 12 clusters
+# set.seed(1010); # 1010 (11) >> 1010(15)>> 1010(11)>>60989(14)
+# km_nn <- clusterCells(sce, use.dimred="PCA",
+#   BLUSPARAM=TwoStepParam(
+#       first=KmeansParam(centers=1440), # 1440 (11)>> 1430(15)>> 1430(11)>>1125(14)
+#       second=NNGraphParam(k=10) # 12 (11)>>12 (15) >> 13 (11)>>8(14)
+#   ), full = TRUE
+# )
+
+km_nn_params <- list(seed = 1010, centers = 1440, k = 10)
+
+set.seed(km_nn_params$seed)
+km_nn <- clusterCells(sce, use.dimred="PCA",
+  BLUSPARAM=TwoStepParam(
+      first=KmeansParam(centers=km_nn_params$centers), # 1440 (11)>> 1430(15)>> 1430(11)>>1125(14)
+      second=NNGraphParam(k=km_nn_params$k) # 12 (11)>>12 (15) >> 13 (11)>>8(14)
+  ), full = TRUE
+)
+
+table(km_nn$clusters)
+
+# add hclusters as labels
+sce$km_nn_cluster <- km_nn$clusters
+
+# add params
+metadata(sce)$params <- append(metadata(sce)$params, list(km_nn = km_nn_params))
+
+# (file <- tempfile())
+# write_csv(data.frame(sample = sce$sample,cluster = sce$km_nn_cluster), file)
+
+# set.seed(2920)
+# sce <- runTSNE(sce, dimred="PCA")
+
+
+k_nn_pca <- plotReducedDim(sce, dimred="PCA", text_by = "km_nn_cluster",color_by = "km_nn_cluster")+ 
+  ggtitle("k-means, nearest neighbor PCA")
+(k_nn_tsne <- plotReducedDim(sce, dimred="TSNE",text_by = "km_nn_cluster", color_by = "km_nn_cluster") + 
+    ggtitle("k-means, nearest neighbor TSNE"))
+k_nn_umap <- plotReducedDim(sce, dimred="UMAP",text_by = "km_nn_cluster", color_by = "km_nn_cluster")+
+  ggtitle("k-means, nearest neighbor UMAP")
+
+ggsave(paste0(wd_path, "results/clustering/09_clustering/km_nn_clusters.png"),  
+       k_nn_pca+k_nn_tsne+k_nn_umap, 
+        height = 10, width = 30)
+
+
+```
+
+### permute km params
+#### try combinations of parameters
+```{r, eval = FALSE}
+
+params <- expand.grid(seed = c(1010, 1120,102903,12099, 123040, 60989),
+                     centers = c(1440,1430, 1435, 1445, 1425, 1450  ), 
+                     k = c(12,10, 11,  13, 9, 14 ), KEEP.OUT.ATTRS = F)
+
+params_filled <- params
+
+how.long(T)
+params_filled$num_clust <- mclapply(seq(nrow(params)), function(i){
+  
+  set.seed(params$seed[i]); 
+  km_nn <- clusterCells(sce, use.dimred="PCA",
+    BLUSPARAM=TwoStepParam(
+        first=KmeansParam(centers=params$centers[i]),
+        second=NNGraphParam(k=params$k[i])
+    ), full = TRUE
+  )
+  
+  n_distinct(km_nn$clusters)
+}, mc.cores = detectCores()-1) %>% 
+  unlist()
+how.long() # 1.2 min
+
+
+params_filled$num_clust%>% txtdensity()
+
+
+params_sub <- params_filled[params_filled$num_clust>11, ]
+params_sub <- params_sub[order(params_sub$num_clust) , ]
+
+sprintf("%sresults/clustering/09_clustering/clustering_iter/", wd_path) %>% 
+  {if(!dir.exists(.)){ dir.create(.)}}
+
+how.long(T)
+plots <- mclapply(seq(nrow(params_sub)), function(i){
+  
+  set.seed(params_sub$seed[i]); 
+  km_nn <- clusterCells(sce, use.dimred="PCA",
+    BLUSPARAM=TwoStepParam(
+        first=KmeansParam(centers=params_sub$centers[i]),
+        second=NNGraphParam(k=params_sub$k[i])
+    ), full = TRUE
+  )
+  
+  pars <- unlist(params_sub[ i , ])
+  title = paste(paste(names(pars), pars), collapse = "; ")
+  
+  UMAP <- plotUMAP(sce, color_by = I(km_nn$clusters))+
+    ggtitle(title)+
+    theme(aspect.ratio = 1)
+  
+  TSNE = plotTSNE(sce, color_by = I(km_nn$clusters))+
+    ggtitle(title)+
+    theme(aspect.ratio = 1)
+  
+  ggsave(sprintf("%sresults/clustering/09_clustering/clustering_iter/%s.png", wd_path, paste(paste(names(pars), pars, sep = "_"), collapse = "_")), 
+         TSNE+UMAP, height  = 7, width = 14)
+  
+}, mc.cores = detectCores()-1)  
+how.long() # ~2 min
+
+
+```
+
+#### use seed with best results with more combinations of center and k
+```{r, eval  =FALSE}
+
+params <- expand.grid(seed = 60989,
+                     centers = seq(1120, 1150, 5), 
+                     k = seq(6,15,2), KEEP.OUT.ATTRS = F)
+
+
+sprintf("%sresults/clustering/09_clustering/clustering_iter2/", wd_path) %>% 
+  {if(!dir.exists(.)){ dir.create(.)}}
+
+how.long(T)
+plots <- mclapply(seq(nrow(params)), function(i){
+  
+  set.seed(params$seed[i]); 
+  km_nn <- clusterCells(sce, use.dimred="PCA",
+    BLUSPARAM=TwoStepParam(
+        first=KmeansParam(centers=params$centers[i]),
+        second=NNGraphParam(k=params$k[i])
+    ), full = TRUE
+  )
+  
+  pars <- unlist(params[ i , ])
+  title = paste(paste(names(pars), pars), collapse = "; ")
+  
+  UMAP <- plotUMAP(sce, color_by = I(km_nn$clusters))+
+    ggtitle(title)+
+    theme(aspect.ratio = 1)
+  
+  TSNE = plotTSNE(sce, color_by = I(km_nn$clusters))+
+    ggtitle(title)+
+    theme(aspect.ratio = 1)
+  
+  ggsave(sprintf("%sresults/clustering/09_clustering/clustering_iter2/%s.png", wd_path, paste(paste(names(pars), pars, sep = "_"), collapse = "_")), 
+         TSNE+UMAP, height  = 7, width = 14)
+  
+}, mc.cores = detectCores()-1)  
+how.long()
+
+```
+
+#### move plots
+```{r, eval = FALSE}
+
+# move plots of interest to own folder
+km_plots_files <- list.files(sprintf("%sresults/clustering/09_clustering/clustering_iter/",wd_path))
+km_plots_files_sub <- grep("clust_[11-20]", km_plots_files, value = TRUE) %>% 
+  grep("10.png", ., value = TRUE, invert = TRUE)
+
+dest_dir <- sprintf("%sresults/clustering/09_clustering/clustering_iter/sub_clustering_iter",wd_path)
+
+# make dir, clear if already there and make it , if not there, just make it
+dest_dir %>% 
+  {if(dir.exists(.)){
+      unlink(., recursive = TRUE)
+      dir.create(.)
+      } else{
+        dir.create(.)
+      }
+    }
+
+# Construct full source and destination paths
+source_paths <- file.path(sprintf("%sresults/clustering/09_clustering/clustering_iter",wd_path), km_plots_files_sub)
+dest_paths <- file.path(dest_dir, km_plots_files_sub)
+
+# Move the files
+file.copy(source_paths, dest_paths)
+
+```
+
+
+# Analyse clusters
+
+## **** COMBINE CLUSTERS THAT ARE SIMILAR ****
+```{r}
+
+# combine 12>>3, 4>>7, 9>>2
+sce$my_cluster <- sce$km_nn_cluster
+sce$my_cluster[sce$my_cluster == "4"] <- "7"
+sce$my_cluster[sce$my_cluster == "9"] <- "2"
+sce$my_cluster[sce$my_cluster == "12"] <- "3"
+
+
+unique(sce$my_cluster)  %>% as.numeric()
+
+plot(as.numeric(as.character(sce$km_nn_cluster)), as.numeric(as.character(sce$my_cluster)))
+axis(side = 1, at = seq(0, 16, by = 1))
+axis(side = 2, at = seq(0, 16, by = 1))
+abline(h = 0:15, lty = 2, col= 'grey80')
+abline(v = 0:15, lty = 2, col= 'grey80')
+
+# refactor; set to numeric; factor levels
+sce$my_cluster <- factor(as.numeric(factor(sce$my_cluster , 
+  levels = as.character(c(1:3,5:8,10:11,13:16)))))
+
+```
+
+
+## aggregate across cells and plot Heatmap of cluster x variable for NN and HC clustering on assay and assay distance matrix
+```{r}
+
+# what assay to aggregate on 
+# assay_to_aggregate <- "scaled_measure_vars"
+assay_to_aggregate <- "pmm_imp_of_scaled"
+
+# KM-NN AGGREGATE ------------
+
+# aggregate clusters by mean of each variable on unscaled assay (mean of raw value versus scaled values)
+agg_cell <- aggregateAcrossCells(sce , use.assay.type = assay_to_aggregate, ids = sce$my_cluster, statistics = "mean")
+
+# scale aggregate assay
+assay(agg_cell, "scaled") <- assay(agg_cell, assay_to_aggregate) %>% t() %>% scale() %>% t()
+
+# Get cluster sizes
+cluster_sizes <- table(sce$my_cluster)
+
+# Define column annotation with cluster sizes
+col_anno <- HeatmapAnnotation(
+  "Cluster Size" = anno_barplot(as.matrix(cluster_sizes),
+                                gp = gpar(fill = "grey"),
+                                border = TRUE, 
+                                # width =unit(10, 'cm') ,
+                                height = unit(10, 'cm')
+                                )
+)
+
+
+# Define colors for each data category
+category_colors <- setNames(RColorBrewer::brewer.pal(n = length(unique(rowData(sce)$table_description)), "Set3"), unique(rowData(sce)$table_description))
+msngness_clust_colors <- setNames(RColorBrewer::brewer.pal(n = length(unique(rowData(sce)$msngns_clust)), "Set3"), paste0("X",unique(rowData(sce)$msngns_clust)))
+
+row_anno <-  rowAnnotation(
+  data_category = rowData(sce)$table_description,
+  # msngness_clust = paste0("X",rowData(sce)$msngns_clust),
+  col = list(
+      data_category = category_colors
+      # msngness_clust = msngness_clust_colors
+      )
+  )
+
+hm_m <- assay(agg_cell, "scaled")
+
+# Define heatmap
+set.seed(102)
+hm <- Heatmap(
+  hm_m,
+  name = "Z-score",
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  show_row_dend = TRUE,
+  show_column_dend = TRUE,
+  show_row_names = TRUE,
+  show_column_names = TRUE,
+  column_title = "Cluster Mean Profiles",
+  row_title = "Features",
+  bottom_annotation = col_anno,
+  left_annotation = row_anno,
+  heatmap_legend_param = list(
+    title = "Scaled\nValue",
+    color_bar = "continuous"
+  )
+)
+
+
+# Save plot
+pdf(paste0(wd_path, "results/clustering/09_clustering/aggregated_my_clusters.pdf"), height = 20, width = 10)
+set.seed(123)
+draw(hm,padding = unit(c(5, 5, 5, 5), "mm"), ht_gap = unit(30, "mm"))
+dev.off()
+
+# save column/row ordering
+set.seed(123)
+hm_rw_order <- setNames(rownames(hm_m)[row_order(hm)], seq(rownames(hm_m)))
+set.seed(123)
+hm_col_order <- setNames(colnames(hm_m)[column_order(hm)], seq(colnames(hm_m)))
+
+# save hm ordering
+metadata(sce) <- append(metadata(sce), 
+                        list(other = 
+                               list(cluster_agg_hm_ordering = 
+                                      list(col_order = hm_col_order, row_order =hm_rw_order )
+                                    )
+                             )
+                        )
+
+
+# make phylo tree
+# Convert hclust to a dendrogram object
+dend <- as.dendrogram(hclust(dist(t(assay(agg_cell, "scaled")))))
+
+# Convert to a phylogenetic tree
+phylo_tree <- ape::as.phylo(dend)
+
+png(paste0(wd_path, "results/clustering/09_clustering/aggregated_my_clusters_tree.png"), height = 700, width = 700)
+plot(phylo_tree, type = 'tidy', cex = 2)
+dev.off()
+
+
+# Transpose the matrix
+hm_m_t <- t(hm_m)
+
+# Define new column annotation (was row_anno before transpose)
+col_anno_t <- HeatmapAnnotation(
+  data_category = rowData(sce)$table_description,
+  col = list(data_category = category_colors)
+)
+
+# Define new row annotation (was col_anno before transpose)
+row_anno_t <- rowAnnotation(
+  "Cluster Size" = anno_barplot(as.matrix(cluster_sizes),
+                                 gp = gpar(fill = "grey"),
+                                 border = TRUE, 
+                                 width = unit(3, 'cm'))
+)
+
+# Draw heatmap
+set.seed(123)
+hm_t <- Heatmap(hm_m_t,
+        column_title = "Cluster Feature Averages",
+        name = "Feature Mean\nScaled",
+        column_names_gp = gpar(fontsize = 10), 
+        column_names_max_height  = unit(10, "cm"),
+        top_annotation = col_anno_t,
+        right_annotation = row_anno_t
+)
+
+# Save plot
+pdf(paste0(wd_path, "results/poster_plots/aggregated_my_clusters.pdf"), height = 7, width = 20, bg = "transparent")
+set.seed(123)
+draw(hm_t,padding = unit(c(5, 5, 5, 5), "mm"), ht_gap = unit(30, "mm"),background = "transparent")
+dev.off()
+
+
+# Draw heatmap with annotation
+set.seed(123)
+hm <- Heatmap(hm_m,
+        column_title = "Aggregated KM-NN",
+        name = "cluster mean scaled\nacross clusters",
+        row_names_gp = gpar(fontsize = 10),
+        row_names_max_width = unit(2, "cm"),
+        bottom_annotation =  col_anno, 
+        right_annotation = row_anno
+)
+
+
+
+# plot differently
+transformed_m <- assay(agg_cell, assay_to_aggregate) %>%
+  t() %>% 
+  scale() %>% 
+  t() %>% 
+  {(abs(.)^3) * sign(.)} 
+
+boxplot(transformed_m)
+
+Heatmap(transformed_m,
+        cluster_rows = TRUE,
+        cluster_columns = TRUE,
+        column_title = "Aggregated KM-NN, transformed",
+        row_names_gp = gpar(fontsize = 10),
+        row_names_max_width = unit(2, "cm"), column_dend_height = unit(4, "cm")
+        )
+# grab vars greater than threshold 
+vars_per_clust <- apply(transformed_m, 2, function(col){
+  boxplot(col, plot = FALSE)$out
+})
+
+var_clusts <- split(rep(names(vars_per_clust), lengths(vars_per_clust)), unlist(lapply(vars_per_clust, names)))
+
+var_clusts <- purrr::map(var_clusts, as.data.frame)
+
+var_clusts <- purrr::map(names(var_clusts), ~{
+  nm <- .
+  x <- var_clusts[[nm]]
+  names(x) <- "clust"
+  x[, "var"] <- nm
+  return(x)
+})
+
+var_clusts_d <- var_clusts %>% do.call(rbind,.)
+
+# make df and write csv
+write.csv(var_clusts_d, paste0(wd_path, "processed_data/outlying_vars_per_clust.csv") )
+
+# # LOOK AT CLUSTERS WITH HC ----
+# if(FALSE){
+#   # hc on pcs
+#   clust_hc <- hclust(dist(reducedDim(sce, "PCA")), method = "ward.D2")
+#   
+#   # # Cut tree into clusters
+#   # clusts <- cutree(clust_hc, k = 11)
+#   clusts <- sce$km_nn_cluster[clust_hc$order]
+#   
+#   # Convert hclust to dendrogram
+#   dend <- as.dendrogram(clust_hc)
+#   
+#   # Define cluster colors
+#   
+#   # color_pal <- setNames(palKelly()[seq_along(unique(clusts))], unique(clusts))
+#   color_pal <- cluster_cols
+#   cols <- color_pal[as.character(clusts)][order.dendrogram(dend)]
+#   
+#   # # color branches
+#   # dend <- color_branches(dend, col = cols)
+# 
+#   # Remove labels from the dendrogram
+#   labels(dend) <- NULL  
+#   
+#   # Create an empty matrix (1 row, column names match clustering order)
+#   empty_mat <- matrix(NA, nrow = 1, ncol = length(clusts))
+#   colnames(empty_mat) <- seq_along(clusts)
+#   
+#   # Create annotation for clusters (ribbon)
+#   ha <- HeatmapAnnotation(
+#     Cluster = factor(clusts, levels = unique(clusts)), 
+#     col = list(Cluster = color_pal),
+#     which = "column",
+#     show_legend = FALSE,
+#     annotation_height = unit(10, "cm")
+#   )
+#   
+#   # Create a legend manually
+#   legend_list <- list(
+#     Legend(
+#       labels = names(color_pal),
+#       labels_gp = gpar(fontsize = 20),
+#       legend_gp = gpar(fill = color_pal),
+#       title = "Cluster",
+#       ncol = 1  # Ensures proper legend layout
+#     )
+#   )
+#   
+#   # Generate the heatmap with only the dendrogram and ribbon
+#   pdf(paste0(wd_path, "results/clustering/09_clustering/PC_HC_tree.pdf"), height = 30, width = 100)
+#   ht <- Heatmap(
+#     empty_mat, 
+#     bottom_annotation = ha, 
+#     cluster_columns = dend, 
+#     cluster_rows = FALSE,
+#     show_column_dend = TRUE, 
+#     # heatmap_height = unit(1, 'inch'),
+#     show_heatmap_legend = FALSE, 
+#     column_dend_side = "top",
+#     column_dend_height = unit(25, 'inch'),
+#     col = NA  , 
+#     show_column_names = FALSE,
+#     height = unit(0, "null")
+#   )
+#   
+#   # Draw the plot with manual legend
+#   draw(ht,
+#        annotation_legend_side = "right", 
+#        heatmap_legend_list = legend_list
+#        )
+#   dev.off()
+# }
+
+
+```
+
+### new cluster labels hm
+```{r}
+
+# relabel clusters
+xsce <- sce
+
+## key
+lookup <- tribble(
+~my_cluster, ~new_cluster,
+       3 ,   1,
+       6 ,   2,
+       4 ,   3,
+       9 ,   4,
+       1 ,   5,
+       2 ,   6,
+      12 ,   7,
+      10 ,   8,
+       11,   9,
+        8,  10,
+        5,  11,
+        7,  12,
+       13,  13
+)
+
+## assign new cluster based on ppmean
+xsce$old_my_cluster <- xsce$my_cluster
+xsce$my_cluster <- factor(lookup$new_cluster[match(as.character(xsce$my_cluster), as.character(lookup$my_cluster))])
+
+
+
+agg_cell <- aggregateAcrossCells(xsce , use.assay.type = "pmm_imp_of_scaled", ids = xsce$my_cluster, statistics = "mean")
+
+# scale aggregate assay
+assay(agg_cell, "scaled") <- assay(agg_cell, "pmm_imp_of_scaled") %>% t() %>% scale() %>% t()
+
+# Get cluster sizes
+cluster_sizes <- table(xsce$my_cluster)
+
+# Define column annotation with cluster sizes
+col_anno <- HeatmapAnnotation(
+  "Cluster Size" = anno_barplot(as.matrix(cluster_sizes),
+                                gp = gpar(fill = "grey"),
+                                border = TRUE, 
+                                # width =unit(10, 'cm') ,
+                                height = unit(10, 'cm')
+                                )
+)
+
+
+# Define colors for each data category
+category_colors <- setNames(RColorBrewer::brewer.pal(n = length(unique(rowData(xsce)$table_description)), "Set3"), unique(rowData(xsce)$table_description))
+msngness_clust_colors <- setNames(RColorBrewer::brewer.pal(n = length(unique(rowData(xsce)$msngns_clust)), "Set3"), paste0("X",unique(rowData(xsce)$msngns_clust)))
+
+row_anno <-  rowAnnotation(
+  data_category = rowData(xsce)$table_description,
+  col = list(
+      data_category = category_colors
+      )
+  )
+
+new_hm_m <- assay(agg_cell, "scaled")
+
+# Define heatmap
+set.seed(102)
+new_hm <- Heatmap(
+  new_hm_m,
+  name = "Z-score",
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  show_row_dend = TRUE,
+  show_column_dend = TRUE,
+  show_row_names = TRUE,
+  show_column_names = TRUE,
+  column_title = "Cluster Profiles",
+  row_title = "Features",
+  bottom_annotation = col_anno,
+  left_annotation = row_anno,
+  heatmap_legend_param = list(
+    title = "Scaled Feature\nMean",
+    color_bar = "continuous"
+  )
+)
+
+
+# Save plot
+pdf(paste0(wd_path, "results/clustering/09_clustering/aggregated_new_my_clusters.pdf"), height = 20, width = 10)
+set.seed(123)
+draw(new_hm,padding = unit(c(5, 5, 5, 5), "mm"), ht_gap = unit(30, "mm"))
+dev.off()
+sprintf(
+  "cp %s %s",
+  paste0(wd_path, "results/clustering/09_clustering/aggregated_new_my_clusters.pdf"),
+  paste0(wd_path, "results/publication_figures/aggregated_new_my_clusters.pdf")
+) %>% 
+  system()
+
+```
+
+# Trajectory analysis
+
+## optimize TSNE and UMAP
+### TSNE
+```{r, eval=FALSE}
+
+# diff sce to test on 
+xsce <- sce
+reducedDim(xsce, "TSNE") <- NULL
+assays(xsce) <- list(pmm_imp_of_scaled = assays(xsce)$pmm_imp_of_scaled)
+
+# permuted params to try
+tsne_params <- expand.grid(KEEP.OUT.ATTRS = FALSE,
+  dimred = c("PCA"),
+  perplexity = c(5, 30, 50),  # Default: 30
+  momentum = c(0.5, 0.9),  # Default: 0.5
+  final_momentum = c(0.8, 0.9),  # Default: 0.8
+  eta = c(100, 200, 500),  # Default: 200
+  exaggeration_factor = c(4, 12, 20)  # Default: 12
+) %>% as.data.frame()
+
+if(!dir.exists(sprintf("%sresults/clustering/09_clustering/tsne_param_optim/",wd_path))) dir.create(sprintf("%sresults/clustering/09_clustering/tsne_param_optim/",wd_path))
+
+# for each set of params, plot results parralelly ----
+plots <- parallel::mclapply(seq(nrow(tsne_params)), function(i){
+
+  # make params digestible by do.call
+  params <- as.list(tsne_params[i, ])
+  # add sce to list
+  params <- append(params, list(x = xsce))
+
+
+  seed = 29209
+  set.seed(seed)
+  xsce <- do.call(runTSNE, params)
+
+  # MST
+  colLabels(xsce) <- xsce$km_nn_cluster
+  by.cluster <-  aggregateAcrossCells(xsce , use.assay.type = "pmm_imp_of_scaled", ids = xsce$label, statistics = "mean")
+
+  ## PCA
+  centroids_pca <- reducedDim(by.cluster, "PCA")
+
+  # Set clusters=NULL as we have already aggregated above.
+  mst_pca <- TSCAN::createClusterMST(centroids_pca, clusters=NULL)
+
+  pca_line.data <- reportEdges(by.cluster, mst=mst_pca, clusters=NULL, use.dimred="PCA")
+
+  mst_pca_cluster_plot <- plotPCA(xsce, colour_by="label", text_by = "label", text_colour = "black") +
+      geom_line(data=pca_line.data, mapping=aes(x=PC1, y=PC2, group=edge))
+
+  map.tscan_pca <- mapCellsToEdges(xsce, mst=mst_pca, use.dimred="PCA")
+  tscan.pseudo_pca <- orderCells(map.tscan_pca, mst_pca)
+
+  common.pseudo_pca <- averagePseudotime(tscan.pseudo_pca)
+
+  mst_pca_PT_plot <- plotPCA(xsce, colour_by=I(common.pseudo_pca),
+          text_by="label", text_colour="red") +
+      geom_line(data=pca_line.data, mapping=aes(x=PC1, y=PC2, group=edge))
+
+  ## TSNE
+  tsne_line.data <- reportEdges(by.cluster, mst=mst_pca, clusters=NULL, use.dimred="TSNE")
+
+  mst_tsne_cluster_plot <- plotTSNE(xsce, colour_by="label", text_by = "label", text_colour = "black") +
+      geom_line(data=tsne_line.data, mapping=aes(x=TSNE1, y=TSNE2, group=edge))+
+      theme(aspect.ratio = 1)+
+      ggtitle("TSNE attempt", paste0("seed ", seed,"; ", paste(names(params)[2:7], unlist(params[2:7]), collapse = "; ")))
+
+  ggsave(sprintf("%sresults/clustering/09_clustering/tsne_param_optim/%d_tsne_mst_cluster.png",wd_path, i), mst_tsne_cluster_plot, height = 8, width = 9, bg = "white")
+
+},mc.set.seed = FALSE, mc.cores = detectCores()-1)
+#  dimred perplexity final_momentum momentum eta exaggeration_factor
+# 1    PCA         50            0.9      0.5 100                   4
+# ^^ best 
+
+
+
+# try optimal params ----
+
+# # seed = 29209
+# # seed = 29200
+# set.seed(1)
+# seeds <- runif(20, min = 1, max = 1e6) %>% round()
+# seeds
+# 
+# # 265509 372125 572854 908208 201683 898390 944675 660798 629114  61787 205975 176558 687023
+# # [14] 384104 769842 497700 717619 991906 380036 777445
+# # >>> best:: 205975, 629114, 944675, 201683, 572854
+# 
+# # plots <- mclapply(seeds, function(seed){
+#     
+#   set.seed(seed)
+#   params <- list(x = xsce,dimred = structure(1L, levels = "PCA", class = "factor"), 
+#   
+#       # perplexity = 5, 
+#       # perplexity = 5, 
+#       perplexity = 30,
+#       # momentum = 0.9, 
+#       # momentum = 0.9,
+#       momentum = 0.5,
+#       # final_momentum = 0.8, 
+#       # final_momentum = 0.8,
+#       final_momentum = 0.8,
+#       # eta = 100,
+#       # eta = 100,
+#       eta = 200,
+#       # exaggeration_factor = 20
+#       # exaggeration_factor = 16
+#       exaggeration_factor = 12
+#       )
+#   
+  params <- list(x = xsce,
+                dimred =  "PCA", 
+                perplexity = 50, # 50,
+                final_momentum = 0.9, # 0.9,
+                momentum =0.5, #0.9,
+                eta = 100,  #100,
+                exaggeration_factor = 4 #12
+  )
+  
+  set.seed(29209)
+  xsce <- do.call(runTSNE, params)
+
+  # $momentum
+  # 0.9  0.9  0.9 0.9
+  #
+  # $final_momentum
+  # 0.5  0.5  0.9 0.4
+  #
+  # $eta
+  # 10  613.8  613 613
+  #
+  # $exaggeration_factor
+  # 15  20  20 20
+
+
+  # MST
+  colLabels(xsce) <- xsce$km_nn_cluster
+  by.cluster <-  aggregateAcrossCells(xsce , use.assay.type = "pmm_imp_of_scaled", ids = xsce$label, statistics = "mean")
+
+  ## PCA
+  centroids_pca <- reducedDim(by.cluster, "PCA")
+
+  # Set clusters=NULL as we have already aggregated above.
+  mst_pca <- TSCAN::createClusterMST(centroids_pca, clusters=NULL)
+
+  pca_line.data <- reportEdges(by.cluster, mst=mst_pca, clusters=NULL, use.dimred="PCA")
+
+  mst_pca_cluster_plot <- plotPCA(xsce, colour_by="label", text_by = "label", text_colour = "black") +
+      geom_line(data=pca_line.data, mapping=aes(x=PC1, y=PC2, group=edge))
+
+  map.tscan_pca <- mapCellsToEdges(xsce, mst=mst_pca, use.dimred="PCA")
+  tscan.pseudo_pca <- orderCells(map.tscan_pca, mst_pca)
+
+  common.pseudo_pca <- averagePseudotime(tscan.pseudo_pca)
+
+  mst_pca_PT_plot <- plotPCA(xsce, colour_by=I(common.pseudo_pca),
+          text_by="label", text_colour="red") +
+      geom_line(data=pca_line.data, mapping=aes(x=PC1, y=PC2, group=edge))
+
+  ## TSNE
+  tsne_line.data <- reportEdges(by.cluster, mst=mst_pca, clusters=NULL, use.dimred="TSNE")
+
+  mst_tsne_cluster_plot <- plotTSNE(xsce, colour_by="label", text_by = "label", text_colour = "black") +
+      geom_line(data=tsne_line.data, mapping=aes(x=TSNE1, y=TSNE2, group=edge))
+  mst_tsne_cluster_plot +
+    theme(aspect.ratio = 1)+
+    ggtitle("TSNE attempt", paste0("seed ", seed,"; ", paste(names(params)[2:7], unlist(params[2:7]), collapse = "; ")))
+
+# }, mc.cores = detectCores()-1, mc.set.seed = FALSE)
+# 
+# 
+# grid <- (plots[[1]]+plots[[2]]+plots[[3]]+plots[[4]]+plots[[5]]+plots[[6]]+plots[[7]]+plots[[8]]+plots[[9]]+plots[[10]])/(plots[[11]]+plots[[12]]+plots[[13]]+plots[[14]]+plots[[15]]+plots[[16]]+plots[[17]]+plots[[18]]+plots[[19]]+plots[[20]])
+# 
+# ggsave(paste0(wd_path, "results/clustering/09_clustering/diff_seeds_tsnes_grid.pdf"),grid)
+
+
+
+
+```
+
+
+### UMAP
+
+```{r, eval=FALSE}
+
+# diff sce to test on 
+xsce <- sce
+reducedDim(xsce, "UMAP") <- NULL
+assays(xsce) <- list(pmm_imp_of_scaled = assays(xsce)$pmm_imp_of_scaled)
+
+# construct parameters df
+umap_params <- expand.grid( dimred = c("PCA"), 
+    metric = factor(c("euclidean", "cosine"), levels = c("euclidean", "cosine")), # "euclidean" (the default)"cosine""manhattan" "hamming"
+    spread =  c(.8, 1, 1.2) ,# 1
+    min_dist = c(.005, .01, .02),
+    n_trees = c(25, 50, 75), 
+    n_neighbors = c(10, 15, 20),# 0.01,
+    KEEP.OUT.ATTRS = F
+    ) %>%
+  as.data.frame
+
+umap_params$search_k =with(umap_params, 2 * n_neighbors * n_trees)
+
+
+# make directory for plots
+sprintf("%sresults/clustering/09_clustering/umap_params_optim/",wd_path) %>% 
+  {if(!dir.exists(.)) dir.create(.)}
+
+
+# for each set of params, plot results ----
+how.long(T)
+plots <- parallel::mclapply(seq(nrow(umap_params)), function(i){
+  
+  # make params digestible by do.call
+  params <- as.list(umap_params[i, ])
+  
+  # add sce to list
+  params <- append(params, list(x = xsce))
+  
+  seed = 29209
+  set.seed(seed)
+  xsce <- do.call(runUMAP, params)
+  
+  # MST
+  colLabels(xsce) <- xsce$km_nn_cluster
+  by.cluster <-  aggregateAcrossCells(xsce , use.assay.type = "pmm_imp_of_scaled", ids = xsce$label, statistics = "mean")
+  
+  ## PCA
+  centroids_pca <- reducedDim(by.cluster, "PCA")
+  
+  # Set clusters=NULL as we have already aggregated above.
+  mst_pca <- TSCAN::createClusterMST(centroids_pca, clusters=NULL)
+  
+  pca_line.data <- reportEdges(by.cluster, mst=mst_pca, clusters=NULL, use.dimred="PCA")
+  
+  mst_pca_cluster_plot <- plotPCA(xsce, colour_by="label", text_by = "label", text_colour = "black") +
+      geom_line(data=pca_line.data, mapping=aes(x=PC1, y=PC2, group=edge))
+  
+  map.tscan_pca <- mapCellsToEdges(xsce, mst=mst_pca, use.dimred="PCA")
+  tscan.pseudo_pca <- orderCells(map.tscan_pca, mst_pca)
+  
+  common.pseudo_pca <- averagePseudotime(tscan.pseudo_pca)
+  
+  ## UMAP
+  umap_line.data <- reportEdges(by.cluster, mst=mst_pca, clusters=NULL, use.dimred="UMAP")
+  
+  mst_umap_cluster_plot <- plotUMAP(xsce, colour_by="label", text_by = "label", text_colour = "black") +
+      geom_line(data=umap_line.data, mapping=aes(x=UMAP1, y=UMAP2, group=edge))+
+      theme(aspect.ratio = 1)+
+      ggtitle("UMAP attempt", paste0("seed ", seed,"; ", paste(names(params)[2:length(params)-1], unlist(params[2:length(params)-1]), collapse = "; ")) )
+  
+  ggsave(sprintf("%sresults/clustering/09_clustering/umap_params_optim/%d_umap_mst_cluster.png",wd_path, i), mst_umap_cluster_plot, height = 8, width = 9, bg = "white")
+
+}, mc.set.seed = FALSE, mc.cores = detectCores()-1)
+how.long() # ~ 5.5
+#+ seed: 29209>>
+#+ metric:2,2,2
+#+ spread: 1,.8,.8
+#+ min_dist: 0.02, 0.005, 0.005
+#+ n_trees: 50, 25,25
+#+ n_neighbors: 15, 20, 20
+#+ search_k: 2*n_neighbors*n_trees
+# BEST: Seed 29209; metric cosine; spread 1.2; min_dist 0.005; n_trees 25; n_neighbors 20
+
+# try different seeds ----
+set.seed(1)
+seeds <- runif(20, min = 1, max = 1e6) %>% round()
+
+other_umap_params <- data.frame(
+  seed = seeds,
+  dimred = "PCA", 
+  metric = "cosine",
+  spread = 0.8, 
+  min_dist = 0.005,
+  n_trees = 25,
+  n_neighbors = 10,
+  search_k = 500
+  )
+
+plots <- mclapply(seq(nrow(other_umap_params)), function(i){
+  params <- as.list(other_umap_params[i,-which(names(other_umap_params)=="seed")])
+  params <- append(params, list(x = xsce))
+  
+  set.seed(other_umap_params$seed[i])
+  xsce <- do.call(runUMAP, params)
+
+  # MST
+  colLabels(xsce) <- xsce$km_nn_cluster
+  by.cluster <-  aggregateAcrossCells(xsce , use.assay.type = "pmm_imp_of_scaled", ids = xsce$label, statistics = "mean")
+
+  ## PCA
+  centroids_pca <- reducedDim(by.cluster, "PCA")
+
+  # Set clusters=NULL as we have already aggregated above.
+  mst_pca <- TSCAN::createClusterMST(centroids_pca, clusters=NULL)
+
+  pca_line.data <- reportEdges(by.cluster, mst=mst_pca, clusters=NULL, use.dimred="PCA")
+
+  mst_pca_cluster_plot <- plotPCA(xsce, colour_by="label", text_by = "label", text_colour = "black") +
+      geom_line(data=pca_line.data, mapping=aes(x=PC1, y=PC2, group=edge))
+
+  map.tscan_pca <- mapCellsToEdges(xsce, mst=mst_pca, use.dimred="PCA")
+  tscan.pseudo_pca <- orderCells(map.tscan_pca, mst_pca)
+
+  common.pseudo_pca <- averagePseudotime(tscan.pseudo_pca)
+
+  mst_pca_PT_plot <- plotPCA(xsce, colour_by=I(common.pseudo_pca),
+          text_by="label", text_colour="red") +
+      geom_line(data=pca_line.data, mapping=aes(x=PC1, y=PC2, group=edge))
+
+  
+  umap_line.data <- reportEdges(by.cluster, mst=mst_pca, clusters=NULL, use.dimred="UMAP")
+
+  mst_umap_cluster_plot <- plotUMAP(xsce, colour_by="label", text_by = "label", text_colour = "black") +
+      geom_line(data=umap_line.data, mapping=aes(x=UMAP1, y=UMAP2, group=edge))
+  mst_umap_cluster_plot +
+    theme(aspect.ratio = 1)+
+    ggtitle("UMAP attempt",sprintf("seed = %d", other_umap_params$seed[i]))
+
+}, mc.cores = detectCores(), mc.set.seed = FALSE)
+length(plots)
+grid <-wrap_plots(plots, ncol = 5, nrow = 4)
+
+ggsave(paste0(wd_path, "results/clustering/09_clustering/diff_seeds_umaps_grid.png"),grid,height = 15, width = 20)
+
+
+# Try favorite seeds ----
+other_umap_params <- data.frame(
+  seed = c(29209, 794240),
+  dimred = "PCA", 
+  metric = "cosine",
+  spread = 0.8, 
+  min_dist = 0.005,
+  n_trees = 25,
+  n_neighbors = 10,
+  search_k = 500
+  )
+
+
+plots <- mclapply(seq(nrow(other_umap_params)), function(i){
+  params <- as.list(other_umap_params[i,-which(names(other_umap_params)=="seed")])
+  params <- append(params, list(x = xsce))
+  
+  set.seed(other_umap_params$seed[i])
+  xsce <- do.call(runUMAP, params)
+
+  # MST
+  colLabels(xsce) <- xsce$km_nn_cluster
+  by.cluster <-  aggregateAcrossCells(xsce , use.assay.type = "pmm_imp_of_scaled", ids = xsce$label, statistics = "mean")
+
+  ## PCA
+  centroids_pca <- reducedDim(by.cluster, "PCA")
+
+  # Set clusters=NULL as we have already aggregated above.
+  mst_pca <- TSCAN::createClusterMST(centroids_pca, clusters=NULL)
+
+  pca_line.data <- reportEdges(by.cluster, mst=mst_pca, clusters=NULL, use.dimred="PCA")
+
+  mst_pca_cluster_plot <- plotPCA(xsce, colour_by="label", text_by = "label", text_colour = "black") +
+      geom_line(data=pca_line.data, mapping=aes(x=PC1, y=PC2, group=edge))
+
+  map.tscan_pca <- mapCellsToEdges(xsce, mst=mst_pca, use.dimred="PCA")
+  tscan.pseudo_pca <- orderCells(map.tscan_pca, mst_pca)
+
+  common.pseudo_pca <- averagePseudotime(tscan.pseudo_pca)
+  
+  umap_line.data <- reportEdges(by.cluster, mst=mst_pca, clusters=NULL, use.dimred="UMAP")
+
+  mst_umap_cluster_plot <- plotUMAP(xsce, colour_by="label", text_by = "label", text_colour = "black") +
+    geom_line(data=umap_line.data, mapping=aes(x=UMAP1, y=UMAP2, group=edge))+
+    theme(aspect.ratio = 1)+
+    ggtitle("UMAP attempt",sprintf("seed = %d", other_umap_params$seed[i]))
+
+  
+  map.tscan_umap <- mapCellsToEdges(xsce, mst=mst_pca, use.dimred="PCA")
+  tscan.pseudo_umap <- orderCells(map.tscan_umap, mst_pca)
+  
+  common.pseudo_umap <- averagePseudotime(tscan.pseudo_umap)
+  
+  mst_umap_PT_plot <- plotUMAP(xsce, colour_by=I(common.pseudo_umap),text_by="label", text_colour="red") +
+      geom_line(data=umap_line.data, mapping=aes(x=UMAP1, y=UMAP2, group=edge))+
+      theme(aspect.ratio = 1)+
+      ggtitle("UMAP attempt",sprintf("seed = %d", other_umap_params$seed[i]))
+
+    
+  mst_umap_PT_plot+mst_umap_cluster_plot
+   
+}, mc.cores = detectCores(), mc.set.seed = FALSE)
+
+wrap_plots(plots, ncol = 1)
+# ^ 29209 best 
+
+```
+
+### manage umap/tsne plots
+     
+     with parameters of 'param_df_name', cluster parameters with hc, move plots into folder by cluster
+     
+```{r, eval = FALSE}
+
+# param df to cluster
+param_df_name <- 'umap_params'
+param_df <- get(param_df_name)
+
+
+# add par clust to tsne params
+par_dist <- dist(scale(data.matrix(param_df[,-1])))
+hc <- hclust(par_dist, method = "ward.D2")
+
+# Plot the dendrogram with colored labels
+plot(hc, labels = FALSE)
+text(x = seq_along(hc$order), 
+     y = rep(-0.5, length(hc$order)), 
+     labels = hc$order, 
+     col = ifelse(seq(nrow(param_df))[hc$order]%in%c(60
+                                                     ), "red", "black"), 
+     cex = 0.7, 
+     pos = 1,
+     offset =1.5, 
+     srt = 90
+      )
+clusts <- cutree(hc, k = 11)
+
+param_df$par_clust <- clusts
+write.csv(param_df, sprintf("%sresults/clustering/09_clustering/%s.csv",wd_path, param_df_name))
+
+
+# Heatmap of param clusters
+param_df %>% 
+  select(-dimred) %>% 
+  data.matrix( ) %>% 
+  as.data.frame() %>% 
+  # group_by( par_clust) %>% 
+  # reframe(across(everything(), mean)) %>% 
+  # ungroup() %>%
+  mutate(rows = 1:n()) %>%
+  column_to_rownames("rows") %>% 
+  scale() %>%
+  t() %>% 
+  Heatmap()
+
+# select move images into directories by cluster
+groups <- split(seq(nrow(param_df)), paste("clust",clusts, sep = ""))
+
+source_dir <- sprintf("%sresults/clustering/09_clustering/%s_optim/",wd_path, param_df_name)
+files <- list.files(source_dir) 
+
+
+
+# for each clsuter, move all images to same directory
+for(group_name in names(groups)){
+  group <- groups[[group_name]]
+  
+  dest_dir <- sprintf("%sresults/clustering/09_clustering/%s_optim_%s/",wd_path,param_df_name, group_name)
+  
+  # make dir, clear if already there and make it , if not there, just make it
+  dest_dir %>% 
+    {if(dir.exists(.)){
+        unlink(., recursive = TRUE)
+        dir.create(.)
+        } else{
+          dir.create(.)
+        }
+      }
+  
+  files_to_move <- grep(paste(sprintf("^%d_", group), collapse = "|"), files, value = TRUE)
+
+  # Construct full source and destination paths
+  source_paths <- file.path(source_dir, files_to_move)
+  dest_paths <- file.path(dest_dir, files_to_move)
+
+  # Move the files
+  file.copy(source_paths, dest_paths)
+  
+}
+ 
+# momentum .9, perplexity 50, eta 100
+# hi momentum, high perplexity, low eta
+# 48, 51,54,57 62,63, 65
+
+# rownames(tsne_params) <- seq(nrow(tsne_params)) 
+# 
+# tsne_params[, -c(1, 7)] %>%
+# # tsne_params[c(48, 51,54,57, 62,63, 65), -c(1, 7)] %>% 
+#   scale() %>%
+#   # {x <- .; x[which(is.nan(x), arr.ind = T)] <- 0;x} %>%
+#   t() %>% 
+#   Heatmap( )
+
+group <- c(19,22,58,60,27,111,110,140, 95,97,151)
+group_name = "my_picks"
+
+groups %>% 
+    purrr::map(~{(group%in%. )%>% sum()})
+
+umap_params[group, ]
+
+```
+
+## MST and sling curve
+```{r}
+
+
+# MST ------------
+# colLabels(sce) <- sce$km_nn_cluster
+colLabels(sce) <- sce$my_cluster
+by.cluster <-  aggregateAcrossCells(sce , use.assay.type = "pmm_imp_of_scaled", ids = sce$label, statistics = "mean")
+
+# get pca cluster centroids
+centroids_pca <- reducedDim(by.cluster, "PCA")
+
+# calculate MST; Set clusters=NULL as we have already aggregated above.
+mst_pca <- TSCAN::createClusterMST(centroids_pca, clusters=NULL)
+
+# calculate pseudotime by mapping cells to mst edges
+map.tscan <- mapCellsToEdges(sce, mst=mst_pca, use.dimred="PCA")
+tscan.pseudo <- orderCells(map.tscan, mst_pca)
+sce$pseudoprog <- averagePseudotime(tscan.pseudo) 
+
+## PCA ----
+pca_line.data <- reportEdges(by.cluster, mst=mst_pca, clusters=NULL, use.dimred="PCA")
+
+mst_pca_cluster_plot <- plotPCA(sce, colour_by="label", text_by = "label", text_colour = "black") + 
+    geom_line(data=pca_line.data, mapping=aes(x=PC1, y=PC2, group=edge))+
+  theme(aspect.ratio = 1)
+
+
+mst_pca_PT_plot <- plotPCA(sce, colour_by='pseudoprog', 
+        text_by="label", text_colour="red") +
+    geom_line(data=pca_line.data, mapping=aes(x=PC1, y=PC2, group=edge))+
+  theme(aspect.ratio = 1)
+
+## TSNE ----
+tsne_line.data <- reportEdges(by.cluster, mst=mst_pca, clusters=NULL, use.dimred="TSNE")
+
+mst_tsne_cluster_plot <- plotTSNE(sce, colour_by="label", text_by = "label", text_colour = "black") + 
+    geom_line(data=tsne_line.data, mapping=aes(x=TSNE1, y=TSNE2, group=edge))+
+  theme(aspect.ratio = 1)
+mst_tsne_cluster_plot
+
+mst_tsne_PT_plot <- 
+  plotTSNE(sce, colour_by='pseudoprog',
+  # plotTSNE(sce, colour_by="km_nn_cluster", 
+        text_by="label", text_colour="red") +
+    geom_line(data=tsne_line.data, mapping=aes(x=TSNE1, y=TSNE2, group=edge))+
+  theme(aspect.ratio = 1)
+
+
+## UMAP ----
+umap_line.data <- reportEdges(by.cluster, mst=mst_pca, clusters=NULL, use.dimred="UMAP")
+
+mst_umap_cluster_plot <- plotUMAP(sce, colour_by="label", text_by = "label", text_colour = "black") +
+    geom_line(data=umap_line.data, mapping=aes(x=UMAP1, y=UMAP2, group=edge))+
+  theme(aspect.ratio = 1)
+
+mst_umap_PT_plot <- plotUMAP(sce, colour_by="pseudoprog",
+        text_by="label", text_colour="red") +
+    geom_line(data=umap_line.data, mapping=aes(x=UMAP1, y=UMAP2, group=edge))+
+  theme(aspect.ratio = 1)
+
+# save line data to sce
+metadata(sce) <- append(metadata(sce), list(trajectory_data = list(pca_line_data = pca_line.data, umap_line_data = umap_line.data, tsne_line_data = tsne_line.data)))
+
+
+
+# save trajectory plots
+(traj_plot <- (mst_pca_cluster_plot+mst_tsne_cluster_plot+mst_umap_cluster_plot)/ (mst_pca_PT_plot + mst_tsne_PT_plot+mst_umap_PT_plot))
+# draw(hm)
+
+ggsave(  paste0( wd_path, "results/clustering/09_clustering/trajectory_plots.png"), traj_plot, height = 10, width =  15, dpi = 300)
+
+```
+
+
+### Compare versions clusters to original 
+```{r, eval = FALSE}
+
+# original where ISOS_LOC in {0, 1(central), 2(juxtafoveal)}
+old_sce <- readRDS("/Users/christiananderson/Library/CloudStorage/Egnyte-lmri/Shared/LMRI/DS_Group/PRJ2024001/analysis_versions/version013/processed_data/sce002_original_clustering.rds")
+
+# current sce to filter
+new_sce <- sce
+
+
+# # look at counts in each cluster
+ncol(sce)-ncol(old_sce)
+# befr_tbl_old <- table(old_sce$km_nn_cluster)
+# befr_tbl_new <- table(new_sce$km_nn_cluster)
+
+# make samples more agreeable
+cnames_new <- colnames(new_sce)
+cnames_old <- colnames(old_sce)
+
+nums_new <- str_extract_all(cnames_new, "[0-9]+(?:\\.[0-9]+)?$") %>%
+  unlist() %>% 
+  as.numeric() %>% 
+  round(1)
+nums_old <- str_extract_all(cnames_old, "[0-9]+(?:\\.[0-9]+)?$") %>%
+  unlist() %>% 
+  as.numeric() %>% 
+  round(1)
+
+cnames_new <-str_remove_all(cnames_new, "[0-9]+(?:\\.[0-9]+)?$") %>% 
+  paste(., nums_new, sep = "")
+
+cnames_old <-str_remove_all(cnames_old, "[0-9]+(?:\\.[0-9]+)?$") %>% 
+  paste(., nums_old, sep = "")
+
+new_sce$sample <- cnames_new
+old_sce$sample <- cnames_old
+
+plot.new();VennDiagram::venn.diagram(
+  x = list(new = new_sce$sample, old =old_sce$sample ),
+  filename = NULL,
+  disable.logging = TRUE,
+  output=TRUE,
+  lwd = 2,
+  # lty = 'blank',
+  fill = c("#E69F00", "#56B4E9"),
+  cex = .9,
+  fontface = "italic",
+  cat.dist = c(-0.05, -0.05)
+  ) %>%
+  grid.draw()
+
+new_sce <- new_sce[, new_sce$sample %in% old_sce$sample]
+old_sce <- old_sce[, old_sce$sample %in% new_sce$sample]
+
+
+
+# aftr_tbl_old <- table(old_sce$km_nn_cluster)
+# aftr_tbl_new <- table(new_sce$km_nn_cluster)
+# 
+# clust_counts_new <- cbind(befr_tbl_new, aftr_tbl_new)
+# clust_counts_old <- cbind(befr_tbl_old, aftr_tbl_old)
+# 
+# clust_counts_old <- cbind(clust_counts_old, (clust_counts_old[,1] - clust_counts_old[, 2])/clust_counts_old[,1])
+# clust_counts_new <- cbind(clust_counts_new, (clust_counts_new[,1] - =clust_counts_new[, 2])/clust_counts_new[,1])
+
+old_centroids <-
+  reducedDims(old_sce)$TSNE %>%
+  cbind(cluster = old_sce$km_nn_cluster) %>%
+  as.data.frame() %>%
+  summarize(across(TSNE1:TSNE2, ~median(.)), .by = cluster) %>%
+  arrange(cluster)  
+
+new_centroids <- reducedDims(new_sce)$TSNE %>%
+  cbind(cluster = new_sce$my_cluster) %>%
+  as.data.frame() %>%
+  summarize(across(TSNE1:TSNE2, ~median(.)), .by = cluster) %>%
+  arrange(cluster)  
+
+structure <- as.data.frame(data.table::fread(
+  "from to
+  1 2
+  2 5
+  2 3
+  3 11
+  3 7
+  3 9
+  2 4
+  4 10
+  4 8
+  4 6"
+))
+
+# Join coordinates for the 'from' and 'to' clusters
+old_line_data <- structure %>%
+  left_join(old_centroids, by = c("from" = "cluster")) %>%
+  rename_with(~c('from', 'to', 'from_TSNE1' ,'from_TSNE2')) %>%
+  left_join(old_centroids, by = c("to" = "cluster")) %>%
+  rename_with(~c('from', 'to', 'from_TSNE1' ,'from_TSNE2','to_TSNE1' ,'to_TSNE2' )) 
+
+# color new TSNE by old clusters --> object_clusters
+new_old <- plotTSNE(new_sce, color_by = I(old_sce$km_nn_cluster), text_by = I(old_sce$km_nn_cluster))+
+  ggtitle("New TSNE with OG clusters")+
+  theme(aspect.ratio = .9)+
+  geom_line(data=tsne_line.data, mapping=aes(x=TSNE1, y=TSNE2, group=edge))+
+  geom_label(data = new_centroids, aes(x = TSNE1, y = TSNE2, label = cluster), colour = "black", fill = "white", alpha = .5)
+
+new_new <- plotTSNE(new_sce, color_by = "km_nn_cluster", text_by = )+
+  ggtitle("New TSNE with new clusters")+
+  theme(aspect.ratio = .9)+
+  geom_line(data=tsne_line.data, mapping=aes(x=TSNE1, y=TSNE2, group=edge))+
+  geom_label(data = new_centroids, aes(x = TSNE1, y = TSNE2, label = cluster), colour = "black", fill = "white", alpha = .5)
+
+# color old TSNE by new clusters
+old_new <- plotTSNE(old_sce, color_by = I(new_sce$km_nn_cluster), text_by = I(new_sce$km_nn_cluster))+
+  ggtitle("OG TSNE with new clusters")+
+  theme(aspect.ratio = .9)+
+  geom_segment(data = old_line_data, aes(x = from_TSNE1, y = from_TSNE2, xend = to_TSNE1, yend = to_TSNE2))+
+  geom_label(data = old_centroids, aes(x = TSNE1, y = TSNE2, label = cluster), colour = "black", fill = "white", alpha = .5)
+
+old_old <- plotTSNE(old_sce, color_by = 'km_nn_cluster')+
+  ggtitle("OG TSNE with OG clusters")+
+  theme(aspect.ratio = .9)+
+  geom_segment(data = old_line_data, aes(x = from_TSNE1, y = from_TSNE2, xend = to_TSNE1, yend = to_TSNE2))+
+  geom_label(data = old_centroids, aes(x = TSNE1, y = TSNE2, label = cluster), colour = "black", fill = "white", alpha = .5)
+  
+
+(p <- (old_old+old_new)/(new_old+new_new))
+
+
+ggsave(paste0(wd_path, 'results/clustering/09_clustering/old_versus_new_clustering.png'),
+       p,
+       height = 10, width =10)
+
+```
+
+### Fudge Pseudotime to not regress
+```{r}
+
+
+# grab vars to fix pt
+pt_d <- colData(sce)[, c("sample", "patID", "patID_eye", "month", "pseudoprog")] %>% 
+  as.data.frame()
+
+# look to see how much regression is happening // save eyes that regress
+pseudoprog_regressors <- pt_d %>% 
+  arrange(month) %>% 
+  group_by(patID_eye) %>% 
+  filter(pseudoprog<lag(pseudoprog)) %>% 
+  # ggplot(aes(month, pseudoprog))+ geom_line(aes(colour =patID_eye), show.legend = FALSE)
+  pull(patID_eye) %>% 
+  unique()
+
+
+# for each eye, ordered by month, set current to last if current < last
+pt_d <- pt_d %>% 
+  group_by(patID_eye) %>% 
+  arrange(month) %>% 
+  mutate(regr_fxd_pseudoprog = cummax_na(pseudoprog)) %>% 
+  ungroup()
+  
+
+ggplot()+
+  geom_line(data = pt_d%>% filter(patID_eye %in% pseudoprog_regressors),
+            aes(month, pseudoprog, group = patID_eye), color = "red", show.legend = FALSE, alpha = .3,  linewidth = .3)+
+  geom_line(data = pt_d%>% filter(patID_eye %in% pseudoprog_regressors),
+            aes(month, regr_fxd_pseudoprog, group = patID_eye), color = "blue", alpha = .3, show.legend = FALSE, linewidth = .3)+
+  ggtitle("Fixing Pseudoprogression Regression\nblack/blue = orig./fixed")+
+  theme_bw()
+
+# add fixed pseudoprogression back to sce if ordering matches
+if(all(sce$sample == pt_d$sample)) sce$regr_fxd_pseudoprog <- pt_d$regr_fxd_pseudoprog else warning("Check that ordering matches!")
+
+
+# plot original and fixed on TSNE
+orig <- plotReducedDim(sce, "TSNE", colour_by = "pseudoprog")+ ggtitle("Pseudoprogression")
+fixed <- plotReducedDim(sce, "TSNE", colour_by = "regr_fxd_pseudoprog")+ ggtitle("Regression fixed Pseudoprogression")
+
+orig_fixed_grid <- marrangeGrob(sapply(list(orig,fixed), ggplotGrob), ncol = 2, nrow = 1)
+
+
+# make directorey for plot
+paste0(wd_path, "results/clustering/09_clustering/regression_fixing/") %>% 
+  {if(!dir.exists(.)) dir.create(.)}
+
+ggsave(paste0(wd_path, "results/clustering/09_clustering/regression_fixing/original_v_fixed_pseudotime_tsnes.png"),orig_fixed_grid, height = 7, width= 14)
+
+```
+
+
+## TSNE colored by chew grade
+```{r}
+
+
+chew_grade_tsne <- plotTSNE(sce[ , !is.na(sce$chew_grade)], colour_by = "chew_grade" ,text_by="label", text_colour="red")
+# +  geom_line(data=tsne_line.data, mapping=aes(x=TSNE1, y=TSNE2, group=edge))
+ggsave(paste0(wd_path, "results/clustering/09_clustering/chew_grade_tsne.png"),chew_grade_tsne, height = 5, width = 7, bg = "white")
+
+chew_grade_pca <- plotPCA(sce[ , !is.na(sce$chew_grade)], colour_by = "chew_grade",text_by="label", text_colour="red" )+  geom_line(data=pca_line.data, mapping=aes(x=PC1, y=PC1, group=edge))
+ggsave(paste0(wd_path, "results/clustering/09_clustering/chew_grade_pca.png"),chew_grade_pca, height = 5, width = 7, bg = "white")
+
+# divide pseudoprog into 7 scores like chew
+sce$pseudoprog_septile <- cut(sce$pseudoprog, 
+                                breaks = quantile(sce$pseudoprog, seq(0, 1, 1/7)),
+                                labels = 0:(length(seq(0, 1, 1/6)) - 1),
+                                include.lowest = T) %>% 
+  as.character() %>% 
+  as.numeric()
+ 
+# plotTSNE(sce[ , !is.na(sce$chew_grade)], colour_by = "chew_grade")
+# plotTSNE(sce[ , !is.na(sce$chew_grade)], colour_by = "pseudoprog")
+# plotTSNE(sce[ , !is.na(sce$chew_grade)], colour_by = "pseudoprog_septile")
+
+# plot chew and pt over time
+pt_v_chew_d <- colData(sce)[, c('patID_eye','month','chew_grade','pseudoprog','pseudoprog_septile') ] %>% 
+  as.data.frame() %>% 
+  na.omit %>% 
+  pivot_longer(cols = matches("grade|prog$"), names_to = "variable")
+
+ggplot(pt_v_chew_d %>% filter(variable != "pseudoprog_septile"), aes(month, value, color = patID_eye))+
+  geom_point(show.legend = FALSE)+
+  # geom_line(show.legend =FALSE)+
+  geom_smooth(method = "lm", show.legend = FALSE)+
+  geom_smooth(method = "lm", aes(group = 1), show.legend = FALSE)+
+  facet_wrap(~variable)+
+  ggtitle("Chew Grade and Pseudoprogression change over time")+
+  theme_bw()
+
+
+
+# chi square test on chew and pseudoprog
+chew_pt_tab <- table(chew_grade=sce$chew_grade, pseudoprog_septile=sce$pseudoprog_septile)
+chew_pt_tab
+chisq.test(chew_pt_tab )
+# chisq.test(chew_pt_tab, simulate.p.value = TRUE )
+
+cor(sce$chew_grade, sce$pseudoprog, use = "complete.obs") 
+
+
+```
+
+## correlate pseudoprog to vision
+```{r, eval = FALSE}
+
+cor(sce$pseudoprog, as.matrix(t(assays(sce[ grep("RW0", rownames(sce)) ,])$pmm_imp_of_scaled)), use = "complete.obs")
+#   RW034      RW044      RW054      RW064      RW074      RW084      RW094
+# [1,] -0.367122 -0.4272488 -0.4901791 -0.5384068 -0.5670037 -0.5838525 -0.5823807
+
+```
+
+
+# ______________________
+
+## !!!!! REDO CLUSTER ORDERING AND PC1 !!!!!
+```{r}
+
+xsce <- sce
+
+# invert PC1
+## rdims
+pcs <- reducedDim(xsce, "PCA")
+pcs[,"PC1"] <- pcs[,"PC1"] * -1
+reducedDim(xsce, "PCA") <- pcs
+
+## tree
+pc_tree <- metadata(xsce)$trajectory_data$pca_line_data
+pc_tree$PC1 <- pc_tree$PC1 * -1
+metadata(xsce)$trajectory_data$pca_line_data <- pc_tree
+
+# rename clusters
+## order of clusteres along pseudoprog
+new_cluster_names <-  data.frame(colData(xsce))%>% 
+  select(my_cluster, pseudoprog) %>% 
+  summarize(mean_pp = mean(pseudoprog),median_pp = median(pseudoprog), .by = my_cluster) 
+# my_cluster new_cluster
+#          3           1
+#          6           2
+#          4           3
+#          9           4
+#          1           5
+#          2           6
+#         12           7
+#         10           8
+#          11          9
+#           8         10
+#           5         11
+#           7         12
+#          13         13
+ 
+with(new_cluster_names,{
+     plot(mean_pp,median_pp, type = "n")
+     text(mean_pp,median_pp, labels = my_cluster)
+     add_lines()
+  })
+
+new_cluster_names <- new_cluster_names[order(new_cluster_names$mean_pp),]
+new_cluster_names$new_cluster <- seq(nrow(new_cluster_names))
+
+## assign new cluster based on ppmean
+xsce$old_my_cluster <- xsce$my_cluster
+xsce$my_cluster <- factor(new_cluster_names$new_cluster[match(as.character(xsce$my_cluster), as.character(new_cluster_names$my_cluster))])
+
+# ****** Function to replace each part of the edge ******
+replace_edge_clusters <- function(edge_strs) {
+  sapply(edge_strs, function(edge_str){
+    parts <- strsplit(edge_str, "--")[[1]]
+    new_parts <- sapply(parts, function(x) {
+      new_val <- new_cluster_names$new_cluster[match(as.integer(x), new_cluster_names$my_cluster)]
+      as.character(new_val)
+    })
+    paste(new_parts, collapse = "--")
+  })
+}
+
+## replace in trees
+metadata(xsce)$trajectory_data$pca_line_data$old_edge<- metadata(xsce)$trajectory_data$pca_line_data$edge
+metadata(xsce)$trajectory_data$pca_line_data$edge <- replace_edge_clusters(metadata(xsce)$trajectory_data$pca_line_data$old_edge)
+
+metadata(xsce)$trajectory_data$tsne_line_data$old_edge<- metadata(xsce)$trajectory_data$tsne_line_data$edge
+metadata(xsce)$trajectory_data$tsne_line_data$edge <- replace_edge_clusters(metadata(xsce)$trajectory_data$tsne_line_data$old_edge)
+
+```
+# Movement between clusters
+## table for each cluster of what next cluster is
+for each cluster, filter for eyes that have another visit »
+count of what next clusters divided by number of eyes in those each respective cluster » 
+### ratio of source to destination (s/d)
+```{r}
+
+# sumarize counts that move between clusters ---------
+# filter for eyes that exist in >1 cluster 
+pat.d <- colData(xsce) %>% 
+  as.data.frame() %>% 
+  arrange(patID_eye, month) %>% 
+  select(patID_eye, month, my_cluster) %>% 
+  mutate(my_cluster = as.numeric(as.character(my_cluster))) %>% 
+  group_by(patID_eye) %>% 
+  filter(n_distinct(my_cluster) >1) %>%
+  ungroup()
+
+# n per cluster : number in each cluster that moves >> dynamicness?
+move_i <- table(pat.d$my_cluster) %>%
+  as.matrix()
+
+# number that move out of each cluster >> 
+move_from_i <- sapply(seq(n_distinct(xsce$my_cluster)), function(i){
+  pat.d %>% 
+    group_by(patID_eye) %>% 
+    filter(any(my_cluster == i) ) %>% 
+    ungroup() %>%
+    filter(my_cluster!=i & lag(my_cluster) == i) %>% 
+    nrow() 
+})%>% 
+    as.matrix()
+  
+# number that move to each cluster
+move_to_i <- sapply(seq(n_distinct(xsce$my_cluster)), function(i) {
+  pat.d %>% 
+    group_by(patID_eye) %>% 
+    arrange(month) %>%
+    mutate(prev = lag(my_cluster), curr = my_cluster) %>%
+    ungroup() %>%
+    filter(curr == i & !is.na(prev) & prev != curr) %>%
+    nrow()
+}) %>% 
+    as.matrix()
+
+# ratio of exiting from i over going to i >> destinationness
+to_over_from <-  move_to_i /move_from_i
+
+# ratio of >> sourceness
+from_over_to <- move_from_i  / move_to_i
+
+# outflow - inflow (net flow) 
+net_flow <- move_from_i - move_to_i
+
+# add all movement m into one
+move_summary_m <- data.frame(influx=move_to_i,
+                        efflux=move_from_i,
+                        net_flow = net_flow, 
+                        influxivity=to_over_from,
+                        effluxivity= from_over_to) %>% 
+  as.matrix()
+
+move_summary_m[is.infinite(move_summary_m)] <- 0
+
+rownames(move_summary_m) <- as.character(seq(n_distinct(xsce$my_cluster)))
+
+move_summary_hm <- draw(
+  Heatmap(move_summary_m %>% scale(),# %>% t(), 
+        name = "scaled count",
+        cluster_columns = FALSE, 
+        cluster_rows = FALSE, 
+        column_title = "Movement summary", 
+        col = viridis::plasma(100), 
+        column_names_rot = 45, 
+        # column_names_gp = gpar(fontsize = 1)
+        # heatmap_width = unit(3, "inches")
+        )
+)
+move_summary_hm
+
+# plot move summary
+png(paste0(wd_path, "results/clustering/09_clustering/move_summary.png"), height = 900, width = 500)
+move_summary_hm
+dev.off()
+
+```
+
+
+#### counts of eyes that move from i to each other cluster
+how many eyes that come from x go to y, y', y''', etc.
+```{r}
+
+
+# empty schema
+empty_col_m <- matrix(0, ncol = 1, nrow = n_distinct(xsce$my_cluster), dimnames = list(as.character(seq(n_distinct(xsce$my_cluster))), NULL))
+
+# m to fill with raw counts of destinations from i
+next_clusters_m_frequencies <- matrix(NA, nrow = n_distinct(xsce$my_cluster), ncol = n_distinct(xsce$my_cluster), 
+                         dimnames = list(paste("to", as.character(seq(n_distinct(xsce$my_cluster))), sep = "."),paste("from", as.character(seq(n_distinct(xsce$my_cluster))), sep = "."))
+                         )  
+
+# fill m with counts for each destination that come from i
+for (i in 1:ncol(next_clusters_m_frequencies)){
+  # table of counts of each cluster that originate from cluster i  
+  ## for each patID_eye, filter for eyes that exist in cluster i at some point, then grab cluster of eye whose previous cluster is i
+  from_i_to_other_freqs <- pat.d %>%
+    group_by(patID_eye) %>% 
+    arrange(month) %>% 
+    filter(any(my_cluster == i) ) %>% 
+    filter(lag(my_cluster) == i) %>% # filter for where previous cluster == i
+    ungroup() %>% 
+    pull(my_cluster) %>% 
+    table() %>% 
+    as.matrix()
+  
+  # matrix to fill with frequencies
+  from_i_to_other_freqs_new <- empty_col_m
+  
+  # fill matrix with all clusters with frequencies from from_i_to_other_freqs
+  from_i_to_other_freqs_new[rownames(from_i_to_other_freqs) , ] <- from_i_to_other_freqs
+  
+  # fill next_clusters_m_frequencies with raw counts 
+  next_clusters_m_frequencies[,i] <-  from_i_to_other_freqs_new
+}
+ 
+# next_clusters_m_frequencies %>% Heatmap(cluster_rows = FALSE,cluster_columns = FALSE, col = plasma(20))
+
+# # make summary m
+# summary <- cbind(next_clusters_m_frequencies, rowSum = rowSums(next_clusters_m_frequencies))
+# summary <- rbind(summary, colSum = colSums(summary))
+
+# transition matrix (-self transitions) should match move_to_i matrix
+x <- next_clusters_m_frequencies
+diag(x) <- 0
+
+all(rowSums(x)==  move_to_i)
+# ^ TRUE
+
+```
+
+
+#### [ N(c->c') / N(c') ]--------
+what ratio of destination is count of eyes that move from clust i to each cluster?
+of eyes that leave cluster where do they go?
+```{r}
+
+# m to fill with ratio of destination values
+next_clusters_m_ratio_of_dest <-matrix(NA, nrow = n_distinct(xsce$my_cluster), ncol = n_distinct(xsce$my_cluster), 
+                         dimnames = list(paste("to", as.character(1:n_distinct(xsce$my_cluster)), sep = "."),paste("from", as.character(1:n_distinct(xsce$my_cluster)), sep = "."))
+                         )  
+  
+# calculate ratio of destination cluster that moves to clust i'
+for(i in 1:ncol(next_clusters_m_frequencies)){
+  
+  # count of each destination of eyes that come from i
+  from_i_to_other_freqs <- next_clusters_m_frequencies[,i]
+  
+  # of all that move to each cluster, what ratio comes from i
+  ratio <- from_i_to_other_freqs / move_to_i
+  
+  next_clusters_m_ratio_of_dest[, i] <- ratio
+  
+  }  
+
+# set missing to 0
+next_clusters_m_ratio_of_dest[is.na(next_clusters_m_ratio_of_dest)] <- 0
+
+# remove self movement
+diag(next_clusters_m_ratio_of_dest) <- 0
+
+# remove row that don't make sense, i.e. where no movement should be going to
+next_clusters_m_ratio_of_dest <- next_clusters_m_ratio_of_dest[-c(3),]
+
+hm <- Heatmap(next_clusters_m_ratio_of_dest, 
+        name = "ratio",
+        column_title = "N(c->c') / ∑N(any->c')\n(# that move from c to c'\ndivided by total number that move to c')",
+        cluster_rows = FALSE,
+        cluster_columns = FALSE, 
+        col = viridis::plasma(100), 
+        column_names_gp = gpar(fontsize = 25),
+        row_names_gp = gpar(fontsize = 25)
+        )
+draw(hm)
+
+png(paste0(wd_path, "results/clustering/09_clustering/from_i_ratio_of_destination.png"), height = 1000, width = 1000)
+draw(hm)
+dev.off()
+
+ratio_of_dest_tidy_transitions <- next_clusters_m_ratio_of_dest %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("to") %>%
+  pivot_longer(
+    cols = starts_with("from."),
+    names_to = "from",
+    values_to = "ratio"
+  ) %>%
+  mutate(
+    from = as.integer(gsub("from\\.", "", from)),
+    to = as.integer(gsub("to\\.", "", to))
+  ) %>% 
+  mutate(type = "Of eyes entering cluster, where do they come from?" )
+
+ratio_of_dest_tile <- ggplot(ratio_of_dest_tidy_transitions %>% drop_na(), aes(factor(from), factor(to), fill = ratio))+
+  geom_tile()+
+  scale_fill_viridis_c(option = "plasma")+
+  xlab("Origin Cluster")+
+  ylab("Destination Cluster")+
+  ggtitle("Of eyes that move to each cluster, how many come from each cluster")
+
+```
+
+
+#### [ N(c->c') / N(c) ] --------
+what ratio of source is count of eyes that move from clust i to each cluster?
+```{r}
+
+# m to fill with ratios of source
+next_clusters_m_ratio_of_source <-matrix(NA, nrow = n_distinct(xsce$my_cluster), ncol = n_distinct(xsce$my_cluster), 
+                         dimnames = list(paste("to", as.character(1:n_distinct(xsce$my_cluster)), sep = "."),paste("from", as.character(1:n_distinct(xsce$my_cluster)), sep = "."))
+                         )  
+
+# fill m with ratios of source outgoing count
+for (i in 1:ncol(next_clusters_m_ratio_of_source)){
+  
+  # of eyes in clust i, what is their next, non-i cluster
+  from_i_to_other_freqs <- pat.d %>%
+    group_by(patID_eye) %>% 
+    arrange(month) %>% 
+    filter(any(my_cluster == i) ) %>% 
+    filter(my_cluster != i & lag(my_cluster) == i) %>% 
+    # filter(month> max(month[my_cluster == i])) %>% 
+    # filter(row_number() == 1) %>% 
+    ungroup() %>% 
+    pull(my_cluster) %>% 
+    table() %>% 
+    as.matrix()
+  
+  from_i_to_other_freqs_new <- empty_col_m
+
+  # make right dimensions
+  from_i_to_other_freqs_new[as.numeric(rownames(from_i_to_other_freqs)) , ] <- from_i_to_other_freqs
+  
+  # ratio of destination cluster that moves to clust i'
+  ratio <- from_i_to_other_freqs_new / move_from_i
+  
+  next_clusters_m_ratio_of_source[, i] <- ratio
+  
+}  
+
+next_clusters_m_ratio_of_source[is.na(next_clusters_m_ratio_of_source)] <- 0
+
+diag(next_clusters_m_ratio_of_source) <- 0
+
+# remove columns that dont' make sense; terminal clusteres shouldnt have movement out 
+next_clusters_m_ratio_of_source <- next_clusters_m_ratio_of_source[,-c(5,7:8,10:13)]
+
+
+hm <- Heatmap(next_clusters_m_ratio_of_source, 
+        name = "ratio",
+        column_title = "N(c->c') / ∑N(c->any)\n(#that move from c to c'\ndivided by total number that move from c)",
+        cluster_rows = FALSE,
+        cluster_columns = FALSE, 
+        col = viridis::plasma(100),
+        column_names_gp = gpar(fontsize = 25),
+        row_names_gp = gpar(fontsize = 25)
+        )
+
+draw(hm)
+
+png(paste0(wd_path, "results/clustering/09_clustering/from_i_ratio_of_source.png"), height = 1000, width = 1000)
+draw(hm)
+dev.off()
+
+ratio_of_source_tidy_transitions <- next_clusters_m_ratio_of_source %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("to") %>%
+  pivot_longer(
+    cols = starts_with("from."),
+    names_to = "from",
+    values_to = "ratio"
+  ) %>%
+  mutate(
+    from = as.integer(gsub("from\\.", "", from)),
+    to = as.integer(gsub("to\\.", "", to))
+  ) %>% 
+  mutate(type = "Figure A: Of eyes leaving cluster, where do they go?" )
+
+ratio_of_source_tile <- ggplot(ratio_of_source_tidy_transitions %>% drop_na(), aes(factor(from), factor(to), fill = ratio))+
+  geom_tile()+
+  scale_fill_viridis_c(option = "plasma")+
+  xlab("Origin Cluster")+
+  ylab("Destination Cluster")+
+  ggtitle("Figure B: Of eyes that move out of each cluster, how many go to each cluster")
+
+both <- rbind(ratio_of_source_tidy_transitions,ratio_of_dest_tidy_transitions)
+
+ggplot(both %>% drop_na(), aes(factor(from), factor(to), fill = ratio))+
+  geom_tile()+
+  scale_fill_viridis_c(option = "plasma")+
+  xlab("Origin Cluster")+
+  ylab("Destination Cluster")+
+  facet_wrap(~type,columns = 1, scales = "free")+
+  theme_bw()+
+  theme(aspect.ratio = 1,
+        panel.grid = element_blank(),
+        panel.background = element_rect(fill = "transparent", color = NA),
+        plot.background = element_rect(fill = "transparent", color = NA),
+        legend.background = element_rect(fill = "transparent", color = NA),
+        legend.box.background = element_rect(fill = "transparent", color = NA)
+        )+
+  ggtitle("Eye Transitions")
+
+ggsave(paste0(wd_path, "results/clustering/09_clustering/eye_transitions_tile.pdf"), height = 8,width = 15, bg = NULL)
+
+```
+
+
+### make text of transition percentages
+```{r}
+
+# redo clusters
+z <- both
+
+z <- z %>% 
+  mutate(across(c(from, to) , ~., .names= "{.col}_old")) %>% 
+  mutate(across(c(from, to) , 
+                ~case_when(
+                   . == 3 ~ 1,
+                   . == 6 ~ 2,
+                   . == 4 ~ 3,
+                   . == 9 ~ 4,
+                   . == 1 ~ 5,
+                   . == 2 ~ 6,
+                   . == 12 ~ 7,
+                   . == 10 ~ 8,
+                   . == 11~ 9,
+                   . == 8~ 10,
+                   . == 5~ 11,
+                   . == 7~ 12,
+                   . == 13~ 13,
+                   TRUE ~ NA
+                )
+                ))
+
+
+x <- z[z$type==unique(z$type)[1] & z$ratio>.2,]
+x <- x[order(x$from, decreasing = F) , ]
+txt <- with(x, 
+       sprintf("\nOf eyes leaving %s %0.2f go to %s\n" , from,ratio, to)
+)
+
+x <- z[z$type==unique(z$type)[2] & z$ratio>.2,]
+x <- x[order(x$to, decreasing = F) , ]
+
+txt <- c(txt, 
+         with(x, 
+       sprintf("\nOf eyes entering %s %0.2f come from %s\n" , to,ratio, from)
+))
+
+cat(txt)
+
+
+```
+
+
+
+# reduced dim sequential plots
+## making sequential tsne plots
+```{r}
+
+tsne_line_dat <- metadata(xsce)$trajectory_data$tsne_line_data
+
+# dimensions to matach OG plot AR
+h=6
+w=9
+
+# plain bw
+plotReducedDim(xsce, "TSNE")+
+   theme(aspect.ratio = 1)
+ggsave(paste0(wd_path, "results/clustering/09_clustering/plain_tsne.png"), height = h, width = w, bg = "black")
+
+# plain bw with axes
+plotReducedDim(xsce, "TSNE")+
+   theme(aspect.ratio = 1,
+         axis.line = element_line(color = "white"),
+         axis.text = element_text(color = "white"), 
+         axis.title = element_text(color = "white"),
+         axis.ticks = element_line(color = "white"))
+ggsave(paste0(wd_path, "results/clustering/09_clustering/plain_tsne_w_axes.pdf"), height = h, width = w, bg = "black")
+
+# color with cluster labs
+p <- plotReducedDim(xsce, "TSNE", color_by = "my_cluster", text_by = "my_cluster", text_colour = "yellow")+
+  theme(legend.background = element_rect(fill = "white"),
+        legend.margin = ggplot2::margin(t = 4, r = 4, l = 4, b = 4), 
+        aspect.ratio = 1, 
+        )
+
+# Extract the data used in the plot
+label_data <- ggplot_build(p)$data[[2]]  # Second layer is usually geom_text
+
+# Rebuild plot without the geom_text layer
+p$layers[[2]] <- NULL
+
+# Add geom_label manually
+p + geom_label(
+  data = label_data,
+  aes(x = x, y = y, label = label, color = label),
+  color = "black",
+  fill = "white",
+  label.size = 0.2
+)
+
+ggsave(paste0(wd_path, "results/clustering/09_clustering/color_tsne.png"), height = h, width = w, bg = "black")
+
+# color and lines
+p <- plotTSNE(xsce, colour_by="my_cluster", text_by = "my_cluster", text_colour = "yellow") + 
+  theme(legend.background = element_rect(fill = "white"),
+        legend.margin = ggplot2::margin(t = 4, r = 4, l = 4, b = 4), 
+        aspect.ratio = 1)+
+  geom_line(data=tsne_line_dat, mapping=aes(x=TSNE1, y=TSNE2, group=edge), col = "white", linewidth = 1.5)
+
+# Extract the data used in the plot
+label_data <- ggplot_build(p)$data[[2]]  # Second layer is usually geom_text
+
+# Rebuild plot without the geom_text layer
+p$layers[[2]] <- NULL
+
+# Add geom_label manually
+p + geom_label(
+  data = label_data,
+  aes(x = x, y = y, label = label, color = label),
+  color = "black",
+  fill = "white",
+  label.size = 0.2
+)
+
+ggsave(paste0(wd_path, "results/clustering/09_clustering/lines_and_color_tsne.png"), height = h, width = w, bg = "black")
+
+# PT
+p <- plotTSNE(xsce, colour_by="pseudoprog", text_by = "my_cluster", text_colour = "red") +
+  theme(legend.background = element_rect(fill = "white"),
+        legend.margin = ggplot2::margin(t = 4, r = 4, l = 4, b = 4), 
+        aspect.ratio = 1)
+
+# Extract the data used in the plot
+label_data <- ggplot_build(p)$data[[2]]  # Second layer is usually geom_text
+
+# Rebuild plot without the geom_text layer
+p$layers[[2]] <- NULL
+
+# Add geom_label manually
+p + geom_label(
+  data = label_data,
+  aes(x = x, y = y, label = label, color = label),
+  color = "black",
+  fill = "white",
+  label.size = 0.2
+)
+
+ggsave(paste0(wd_path, "results/clustering/09_clustering/pseudoprog_tsne.png"), height = h, width = w, bg = "black", dpi = 200)# PT
+
+p <- plotTSNE(xsce, colour_by="pseudoprog", text_by = "my_cluster", text_colour = "red") +
+  ggtitle("TSNE colored by pseudoprog")+
+  theme(legend.background = element_rect(fill = "white"),
+        legend.margin = ggplot2::margin(t = 4, r = 4, l = 4, b = 4), 
+        aspect.ratio = 1,
+        title = element_text(color = "white"))
+# Extract the data used in the plot
+label_data <- ggplot_build(p)$data[[2]]  # Second layer is usually geom_text
+
+# Rebuild plot without the geom_text layer
+p$layers[[2]] <- NULL
+
+# Add geom_label manually
+p + geom_label(
+  data = label_data,
+  aes(x = x, y = y, label = label, color = label),
+  color = "black",
+  fill = "white",
+  label.size = 0.2
+)
+
+ggsave(paste0(wd_path, "results/clustering/09_clustering/titled_pseudoprog_tsne.png"), height = h, width = w, bg = "black", dpi = 200)
+
+
+# PT with lines
+p <- plotTSNE(xsce, colour_by="pseudoprog", text_by = "my_cluster", text_colour = "red") + 
+  theme(legend.background = element_rect(fill = "white", color = "white") )+
+  geom_line(data=tsne_line_dat, mapping=aes(x=TSNE1, y=TSNE2, group=edge), col = "white")+
+  theme(aspect.ratio = 1)
+
+# Extract the data used in the plot
+label_data <- ggplot_build(p)$data[[2]]  # Second layer is usually geom_text
+
+# Rebuild plot without the geom_text layer
+p$layers[[2]] <- NULL
+
+# Add geom_label manually
+p + geom_label(
+  data = label_data,
+  aes(x = x, y = y, label = label, color = label),
+  color = "black",
+  fill = "white",
+  label.size = 0.2
+)
+
+
+ggsave(paste0(wd_path, "results/clustering/09_clustering/pseudoprog_mst_tsne.png"), height = h, width = w, bg = "black", dpi = 200)
+
+# tsne colored by chew grading score
+p <- plotTSNE(xsce[ , !is.na(xsce$chew_grade)], colour_by="chew_grade", text_by = "my_cluster", text_colour = "red") +
+  ggtitle("TSNE colored by Chew grading score")+
+  theme(legend.background = element_rect(fill = "white"),
+        legend.margin = ggplot2::margin(t = 4, r = 4, l = 4, b = 4), 
+        aspect.ratio = 1, 
+        title = element_text(color = "white"))
+# Extract the data used in the plot
+label_data <- ggplot_build(p)$data[[2]]  # Second layer is usually geom_text
+
+# Rebuild plot without the geom_text layer
+p$layers[[2]] <- NULL
+
+# Add geom_label manually
+p + geom_label(
+  data = label_data,
+  aes(x = x, y = y, label = label, color = label),
+  color = "black",
+  fill = "white",
+  label.size = 0.2
+)
+
+ggsave(paste0(wd_path, "results/clustering/09_clustering/chew_grade_tsne.png"), height = h, width = w, bg = "black", dpi = 200)
+
+# tsne colored by ACUIT
+p <- plotTSNE(xsce[ , !is.na(xsce$ACUIT)], colour_by="ACUIT", text_by = "my_cluster", text_colour = "red") +
+  ggtitle("TSNE colored by visual acuity")+
+  theme(legend.background = element_rect(fill = "white"),
+        legend.margin = ggplot2::margin(t = 4, r = 4, l = 4, b = 4), 
+        aspect.ratio = 1, 
+        title = element_text(color = "white"))
+# Extract the data used in the plot
+label_data <- ggplot_build(p)$data[[2]]  # Second layer is usually geom_text
+
+# Rebuild plot without the geom_text layer
+p$layers[[2]] <- NULL
+
+# Add geom_label manually
+p + geom_label(
+  data = label_data,
+  aes(x = x, y = y, label = label, color = label),
+  color = "black",
+  fill = "white",
+  label.size = 0.2
+)
+
+ggsave(paste0(wd_path, "results/clustering/09_clustering/ACUIT_tsne.png"), height = h, width = w, bg = "black", dpi = 200)
+
+
+```
+
+
+## making sequential PCA plots
+
+### plot
+```{r}
+
+pca_line_dat <- metadata(xsce)$trajectory_data$pca_line_data
+
+# dimensions to matach OG plot AR
+h=6
+w=9
+
+# plain bw
+plotReducedDim(xsce, "PCA")+
+   theme(aspect.ratio = 1)
+ggsave(paste0(wd_path, "results/clustering/09_clustering/plain_pca.png"), height = h, width = w, bg = "black")
+
+# plain bw with axes
+plotReducedDim(xsce, "PCA")+
+  geom_point(color = "grey", alpha = .5)+
+   theme(aspect.ratio = 1,
+         axis.line = element_line(color = "white",linewidth = 1.5),
+         axis.ticks = element_line(color = "white", linewidth = 1.5, size = 2), 
+         axis.text = element_text(color = "white"), 
+         axis.title = element_text(color = "white")
+         )
+
+ggsave(paste0(wd_path, "results/clustering/09_clustering/plain_pca_w_axes.pdf"), height = h, width = w, bg = "black")
+
+# color with cluster labs
+p <- plotReducedDim(xsce, "PCA", color_by = "my_cluster", text_by = "my_cluster", text_colour = "yellow")+
+  theme(legend.background = element_rect(fill = "white"),
+        legend.margin = ggplot2::margin(t = 4, r = 4, l = 4, b = 4), 
+        aspect.ratio = 1,
+         axis.line = element_line(color = "white",linewidth = 2),
+         axis.ticks = element_line(color = "white", linewidth = 2, size = 2), 
+         axis.text = element_text(color = "white"), 
+         axis.title = element_text(color = "white")
+         )
+
+# Extract the data used in the plot
+label_data <- ggplot_build(p)$data[[2]]  # Second layer is usually geom_text
+
+# Rebuild plot without the geom_text layer
+p$layers[[2]] <- NULL
+
+# Add geom_label manually
+p + geom_label(
+  data = label_data,
+  aes(x = x, y = y, label = label, color = label),
+  color = "black",
+  fill = "white",
+  label.size = 0.2
+)
+
+ggsave(paste0(wd_path, "results/clustering/09_clustering/color_pca.png"), height = h, width = w, bg = "black")
+
+
+# color and lines
+p <- plotPCA(xsce, colour_by="my_cluster", text_by = "my_cluster", text_colour = "yellow") + 
+  geom_line(data=pca_line_dat, mapping=aes(x=PC1, y=PC2, group=edge), col = "white", linewidth = 1.5)+
+  theme(legend.background = element_rect(fill = "white"),
+        legend.margin = ggplot2::margin(t = 4, r = 4, l = 4, b = 4), 
+         aspect.ratio = 1,
+         axis.line = element_line(color = "white",linewidth = 2),
+         axis.ticks = element_line(color = "white", linewidth = 2, size = 2), 
+         axis.text = element_text(color = "white"), 
+         axis.title = element_text(color = "white")
+         )
+
+
+# Extract the data used in the plot
+label_data <- ggplot_build(p)$data[[2]]  # Second layer is usually geom_text
+
+# Rebuild plot without the geom_text layer
+p$layers[[2]] <- NULL
+
+# Add geom_label manually
+p + geom_label(
+  data = label_data,
+  aes(x = x, y = y, label = label, color = label),
+  color = "black",
+  fill = "white",
+  label.size = 0.2
+)
+
+ggsave(paste0(wd_path, "results/clustering/09_clustering/lines_and_color_pca.png"), height = h, width = w, bg = "black")
+
+# PT
+p <- plotPCA(xsce, colour_by="pseudoprog", text_by = "my_cluster", text_colour = "red") +
+  theme(legend.background = element_rect(fill = "white"),
+        legend.margin = ggplot2::margin(t = 4, r = 4, l = 4, b = 4), 
+        aspect.ratio = 1,
+         axis.line = element_line(color = "white",linewidth = 1.5),
+         axis.text = element_text(color = "white"), 
+         axis.title = element_text(color = "white"),
+         axis.ticks = element_line(color = "white",linewidth = 1.5))
+
+# Extract the data used in the plot
+label_data <- ggplot_build(p)$data[[2]]  # Second layer is usually geom_text
+
+# Rebuild plot without the geom_text layer
+p$layers[[2]] <- NULL
+
+# Add geom_label manually
+p + geom_label(
+  data = label_data,
+  aes(x = x, y = y, label = label, color = label),
+  color = "black",
+  fill = "white",
+  label.size = 0.2
+)
+
+ggsave(paste0(wd_path, "results/clustering/09_clustering/pseudoprog_pca.png"), height = h, width = w, bg = "black", dpi = 200)# PT
+
+p <- plotPCA(xsce, colour_by="pseudoprog", text_by = "my_cluster", text_colour = "red") +
+  ggtitle("PCA colored by pseudoprog")+
+  theme(legend.background = element_rect(fill = "white"),
+        legend.margin = ggplot2::margin(t = 4, r = 4, l = 4, b = 4), 
+        aspect.ratio = 1,
+        title = element_text(color = "white"))
+
+# Extract the data used in the plot
+label_data <- ggplot_build(p)$data[[2]]  # Second layer is usually geom_text
+
+# Rebuild plot without the geom_text layer
+p$layers[[2]] <- NULL
+
+# Add geom_label manually
+p + geom_label(
+  data = label_data,
+  aes(x = x, y = y, label = label, color = label),
+  color = "black",
+  fill = "white",
+  label.size = 0.2
+)
+
+ggsave(paste0(wd_path, "results/clustering/09_clustering/titled_pseudoprog_pca.png"), height = h, width = w, bg = "black", dpi = 200)
+
+
+# PT with lines
+p <- plotPCA(xsce, colour_by="pseudoprog", text_by = "my_cluster", text_colour = "red") + 
+  theme(legend.background = element_rect(fill = "white", color = "white") )+
+  geom_line(data=pca_line_dat, mapping=aes(x=PC1, y=PC2, group=edge), col = "white")+
+  theme(aspect.ratio = 1)
+# Extract the data used in the plot
+label_data <- ggplot_build(p)$data[[2]]  # Second layer is usually geom_text
+
+# Rebuild plot without the geom_text layer
+p$layers[[2]] <- NULL
+
+# Add geom_label manually
+p + geom_label(
+  data = label_data,
+  aes(x = x, y = y, label = label, color = label),
+  color = "black",
+  fill = "white",
+  label.size = 0.2
+)
+
+
+ggsave(paste0(wd_path, "results/clustering/09_clustering/pseudoprog_mst_pca.png"), height = h, width = w, bg = "black", dpi = 200)
+
+# pca colored by chew grading score
+p <- plotPCA(xsce[ , !is.na(xsce$chew_grade)], colour_by="chew_grade", text_by = "my_cluster", text_colour = "red") +
+  ggtitle("PCA colored by Chew grading score")+
+  theme(legend.background = element_rect(fill = "white"),
+        legend.margin = ggplot2::margin(t = 4, r = 4, l = 4, b = 4), 
+        aspect.ratio = 1, 
+        title = element_text(color = "white"))
+# Extract the data used in the plot
+label_data <- ggplot_build(p)$data[[2]]  # Second layer is usually geom_text
+
+# Rebuild plot without the geom_text layer
+p$layers[[2]] <- NULL
+
+# Add geom_label manually
+p + geom_label(
+  data = label_data,
+  aes(x = x, y = y, label = label, color = label),
+  color = "black",
+  fill = "white",
+  label.size = 0.2
+)
+
+ggsave(paste0(wd_path, "results/clustering/09_clustering/chew_grade_pca.png"), height = h, width = w, bg = "black", dpi = 200)
+
+# pca colored by ACUIT
+p <- plotPCA(xsce[ , !is.na(xsce$ACUIT)], colour_by="ACUIT", text_by = "my_cluster", text_colour = "red") +
+  ggtitle("PCA colored by visual acuity")+
+  theme(legend.background = element_rect(fill = "white"),
+        legend.margin = ggplot2::margin(t = 4, r = 4, l = 4, b = 4), 
+        aspect.ratio = 1, 
+        title = element_text(color = "white"))
+# Extract the data used in the plot
+label_data <- ggplot_build(p)$data[[2]]  # Second layer is usually geom_text
+
+# Rebuild plot without the geom_text layer
+p$layers[[2]] <- NULL
+
+# Add geom_label manually
+p + geom_label(
+  data = label_data,
+  aes(x = x, y = y, label = label, color = label),
+  color = "black",
+  fill = "white",
+  label.size = 0.2
+)
+
+ggsave(paste0(wd_path, "results/clustering/09_clustering/ACUIT_pca.png"), height = h, width = w, bg = "black", dpi = 200)
+
+
+```
+
+
+
+# = = = = = = = = = = = 
+# save data
+```{r}
+# save SCE
+saveHDF5SummarizedExperiment(sce, paste0(wd_path, "processed_data/sce002.h5"), replace = T)
+
+```
+
+
+```{r, look at dims}
+check_dims <- function(D = d){
+  
+  cat(paste0("\ndims : ", paste(dim(D), collapse = " "),"\n"))
+  
+  n_patIDs <- D %>% 
+    select(patID, visitID, eye_num) %>% 
+    drop_na() %>% 
+    pull(patID ) %>% 
+    n_distinct(na.rm = TRUE)
+  
+  n_patID_eyes <- D %>% 
+    select(patID, visitID, eye_num) %>% 
+    drop_na() %>% 
+    select(patID, eye_num) %>% 
+    n_distinct(na.rm = TRUE)
+  
+  n_observations <- D %>% 
+    select(patID, visitID, eye_num) %>% 
+    drop_na() %>% 
+    n_distinct(na.rm = TRUE)
+  
+  n_patIDs_w_gr_1_vis <- D %>% 
+    select(patID, visitID, eye_num) %>% 
+    drop_na() %>% 
+    filter(n()>1, .by = c(patID, eye_num)) %>% 
+    pull(patID) %>% 
+    n_distinct(na.rm = TRUE)
+  
+  print(rbind(n_patIDs,n_patID_eyes,n_observations,n_patIDs_w_gr_1_vis))
+  
+}
+
+
+as.data.frame(colData(sce)) %>% 
+  left_join(
+    as.data.frame(t(assays(sce)$scaled_measure_vars)) %>% 
+      rownames_to_column("sample")
+  ) %>% 
+  check_dims()
+# dims : 12525 143
+#                      [,1]
+# n_patIDs             3675
+# n_patID_eyes         7328
+# n_observations      12525
+# n_patIDs_w_gr_1_vis   516
+# ^ added clustering variables and letter averages
+
+
+### MARCH 24 2025 ###
+# dims : 12276 174
+# n_patIDs             3971
+# n_patID_eyes         7888
+# n_observations      12275
+# n_patIDs_w_gr_1_vis   492
+
+```

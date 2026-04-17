@@ -1,0 +1,1378 @@
+---
+title: "02.1_visit and missingness analysis"
+author: "Christian Anderson"
+date: "`r Sys.Date()`"
+output: html_document
+---
+# options
+```{r}
+# dev.off()  # Turn off the current graphics device
+# options(device = "RStudioGD")
+```
+
+# Packages
+
+```{r, message=FALSE, warning=FALSE, results='hide', echo = TRUE}
+
+pacman::p_load(tidyr,dplyr,ggplot2,reshape2,tidyverse,ggpubr,vcd,UpSetR,gridExtra,Metrics,purrr,corrplot,RColorBrewer,openxlsx,networkD3,htmlwidgets,lubridate,ComplexHeatmap,ggrepel,plotly, parallel, fuzzyjoin)
+
+rm(list = ls())
+gc()
+par(mfrow = c(1,1))
+```
+
+# Load Data
+
+```{r}
+
+wd_path = "~/Documents/LMRI/PRJ2024001/version015/"
+list.files(sprintf('%s/processed_data', wd_path))
+
+data_name <- "CF_FFA_DEM_DIAGNOSIS_ENRNHOR_ENRNHOS_FAFGRADE_FAMSTATUS_MH_OCTMAIN_OCTMTCIRRUS_OCTMTSPECTRALIS_OCTMTSTRATUS_VAA_lea_01.rds"
+
+# joined data full
+d <- readRDS(paste0(wd_path,"processed_data/",data_name))
+
+# list of raw dfs with minimal cleaning
+raw <- readRDS(paste0(wd_path,"processed_data/dfs_list_01.rds"))
+
+# my functions
+source(sprintf("%sanalysis/00_MyFunctions.R", wd_path))
+
+```
+
+
+# make new directory for plots
+```{r}
+path <- paste0(wd_path, "results/visit_missingness_analysis/")
+if(!dir.exists(path)) {
+  dir.create(path, recursive = TRUE)
+  
+}
+
+```
+
+```{r, look at dims}
+
+check_dims <- function(){
+  
+  cat(paste0("\ndims : ", paste(dim(d), collapse = " "),"\n"))
+  
+  n_patIDs <- d %>% 
+    select(patID, visitID, eye_num) %>% 
+    drop_na() %>% 
+    pull(patID ) %>% 
+    n_distinct(na.rm = TRUE)
+  
+  n_patID_eyes <- d %>% 
+    select(patID, visitID, eye_num) %>% 
+    drop_na() %>% 
+    select(patID, eye_num) %>% 
+    n_distinct(na.rm = TRUE)
+  
+  n_observations <- d %>% 
+    select(patID, visitID, eye_num) %>% 
+    drop_na() %>% 
+    n_distinct(na.rm = TRUE)
+  
+  n_patIDs_w_gr_1_vis <- d %>% 
+    select(patID, visitID, eye_num) %>% 
+    drop_na() %>% 
+    filter(n()>1, .by = c(patID, eye_num)) %>% 
+    pull(patID) %>% 
+    n_distinct(na.rm = TRUE)
+  
+  print(rbind(n_patIDs,n_patID_eyes,n_observations,n_patIDs_w_gr_1_vis))
+  
+}
+
+check_dims()
+
+#   n_patIDs n_patID_eyes n_observations n_patIDs_w_gr_1_vis
+# [1,]     4951         9899          15287                 550
+# 
+# dims : 15287 264
+
+### MARCH 11 2025 ###
+# dims : 15119 259
+#                      [,1]
+# n_patIDs             5213
+# n_patID_eyes        10413
+# n_observations      15117
+# n_patIDs_w_gr_1_vis   533
+# > 
+
+```
+
+##### looka at va that doesn't join to others (va anti d)
+
+<!-- ```{r} -->
+
+<!-- # eye groups to loop over -->
+<!-- eyes_buckets <- split(unique(d$patID_eye), cut(seq(unique(d$patID_eye)), detectCores()-1, F)) -->
+
+<!-- VAA <- raw$VAA_lea %>%  -->
+<!--     mutate(start_DATE = ymd(DATE_VAA_lea) - days(18), -->
+<!--            end_DATE = ymd(DATE_VAA_lea) + days(18) -->
+<!--            ) -->
+
+<!-- # all rows in va not in grading -->
+<!-- va_anti_grading_l <- mclapply(eyes_buckets, function(eyes){ -->
+<!--     fuzzy_anti_join(filter(VAA, patID_eye %in% eyes), filter(d, patID_eye %in% eyes), -->
+<!--                 by = c( -->
+<!--                       "patID_eye" ="patID_eye", -->
+<!--                       "start_DATE"="DATE_coalsced", -->
+<!--                       "end_DATE"="DATE_coalsced" -->
+<!--                     ), -->
+<!--                     match_fun = list(`==`, `<=`, `>=`) -->
+<!--                     ) -->
+<!-- }, mc.cores = detectCores()-1) -->
+
+<!-- # df of va records with no match in grading -->
+<!-- va_anti_grading <- do.call(rbind,va_anti_grading_l) -->
+<!-- va_anti_grading <- reorder_id_cols(va_anti_grading) -->
+
+
+
+
+<!-- ``` -->
+
+
+## process data dicitonary
+
+### LOAD AND CLEAN INFO 
+```{r}
+# load info
+data_dict_raw <- read.xlsx("/Users/christiananderson/Library/CloudStorage/Egnyte-lmri/Shared/LMRI/DS_Group/PRJ2024001/raw_data/data_dictionaries/database_grading_key.xlsx")
+
+names(data_dict_raw) <- snakecase::to_snake_case(names(data_dict_raw))
+
+data_dict_raw$field[duplicated(data_dict_raw$field)]
+
+# remove right/left labels; filter for distinct rows; remove duplicated fields
+data_dict <- data_dict_raw %>%
+  as_tibble() %>% 
+  distinct() %>% 
+  filter(!duplicated(field))
+
+# remove extra number in RW vars (specifies chart)
+data_dict$field <- gsub("^RW(.*?)[12]$","RW\\1" , data_dict$field)
+
+# move zone in mt sd vars
+data_dict$field[grep("[iu]s.*SD", data_dict$field)]  <- gsub("MT_SD(\\d{2})", "MT\\1_SD", data_dict$field[grep("[iu]s.*SD", data_dict$field)] )
+```
+
+
+### JOIN INFO FIELD TO D NAMES 
+```{r}
+names_to_match <- grep("start|end|ENR|pat|eye|vis|^DATE|DT", names(d), invert = TRUE, value = TRUE)
+
+# Compute string distances
+dist_matrix <- stringdist::stringdistmatrix(names_to_match, data_dict$field, method = "qgram")
+
+# Find closest match
+closest_match <- apply(dist_matrix, 1, which.min)
+closest_match_dist <- apply(dist_matrix, 1, min)
+
+# Set a reasonable distance threshold (adjust as needed)
+threshold <- 4
+
+# Assign only if distance is below threshold, else assign NA
+best_matches <- ifelse(closest_match_dist <= threshold, data_dict$field[closest_match], NA)
+
+# Create a new dataframe
+info <- data.frame(
+  name = names_to_match,
+  matched_name = best_matches,
+  dist = closest_match_dist,
+  stringsAsFactors = FALSE
+) 
+
+
+info <- info %>% 
+  left_join(data_dict, by = join_by(name == field)) 
+
+#  add remainging names in d 
+remaining_names <- setdiff(names(d),info$name)
+add <- data.frame(matrix(rep(NA,ncol(info)*length(remaining_names)), ncol = ncol(info), dimnames = list(NULL, names(info))))
+add$name = remaining_names
+info <- info %>% 
+  rbind(add)
+
+# remove duplicates
+info <- distinct(info)
+
+info$table[grepl("spectralis|CENTER", info$name, ignore.case = T) & is.na(info$table)] <- "OCTMTSPECTRALIS"
+info$table[grepl("stratus", info$name, ignore.case = T) & is.na(info$table)] <- "OCTMTSTRATUS"
+info$table[grepl("cirrus", info$name, ignore.case = T) & is.na(info$table)] <- "OCTMTCIRRUS"
+info$table[grepl("CF|FFA|ICL", info$name) & is.na(info$table)] <- "CF_FFA"
+info$table[grepl("OCTMAIN", info$name) & is.na(info$table)] <- "OCTMAIN"
+info$table[grepl("FAF", info$name) & is.na(info$table)] <- "FAFGRADE"
+info$table[grepl("VAA|VAP|ACUIT", info$name) & is.na(info$table)] <- "VAA"
+info$table[grepl("DM|[WH]GT|SMK|MH|BLR|DIAG", info$name) & is.na(info$table)] <- "MH/DIAGNOSIS"
+info$table[grepl("RACE|ETHNI|GEND|YR|ENR|pat|FAM|NHO[SR]|DATE|DT|vis|eye|SITE", info$name) & is.na(info$table)] <- "DEM/ENR/FAM/other"
+
+
+# fill in table description
+table_descriptions <- sapply(unique(na.omit(info$table)), function(x) unique( na.omit(info$table_description[info$table==x]))) %>% 
+  Filter(function(x) !is_empty(x),.)
+
+for(tab in names(table_descriptions)){
+  info$table_description[info$table==tab] <- table_descriptions[[tab]]
+}
+
+
+
+# join old info table
+old_info  <- read.xlsx("/Users/christiananderson/Library/CloudStorage/Egnyte-lmri/Shared/LMRI/DS_Group/PRJ2024001/raw_data/data_dictionaries/database_grading_key_old.xlsx")
+
+# each old's value in new
+old_to_new_matches <- sapply(old_info$shorthand, function(pttrn)grep(pttrn, info$name)) %>% 
+  sapply(., function(inds) info$name[inds])
+
+# make space to add old ot new
+add <- old_info[1,] %>% select(shorthand:ncol(.))
+add[1,] <- NA
+add <- add[rep(1,nrow(info)) , ]
+rownames(add) <- NULL
+info <- cbind(info, add)
+
+# add old info  to new at each match
+for(i in seq(old_to_new_matches)){
+  old <- names(old_to_new_matches)[i]
+  new <- old_to_new_matches[[i]]
+  
+  # info to add at cols
+  rows_add <- old_info %>% 
+    filter(shorthand==old) %>% 
+    select(shorthand:ncol(.))
+  
+  # get to right dim
+  rows_add <- rows_add[rep(1,length(new)), ]
+  
+  # add to info
+  info[info$name %in% new , names(add)] <- rows_add
+}
+
+  
+```
+
+### add ordinality to info df
+```{r}
+
+# # write vars and manually label ordinal
+# writeLines(info[info$ordinal , "name", drop = T][order(info$table)], sprintf("%sprocessed_data/df_vars.txt", wd_path))
+
+# load ordinal txt file
+ordinality <- read_delim(sprintf("%sprocessed_data/df_vars.txt", wd_path), delim = ",")
+# ordinality %>% 
+#   arrange(ordinal) %>% 
+#   print(n = 300)
+
+info$ordinal <- NULL
+# add ordinality to info
+info <- info %>% 
+  left_join(ordinality, by = "name")
+
+info$table[grepl("GRADERID", info$name)] <- "GRADING"
+
+```
+
+
+
+#_______________
+# clean data
+```{r}
+
+### make a binary diagnosis field 
+#### 1 if yes, 0 if cannot be determined or no for diagnoses not NA
+d$DIAGNOSIS_binary<- NA
+d$DIAGNOSIS_binary[!is.na(d$DIAGNOSIS)] <- ifelse(d$DIAGNOSIS[!is.na(d$DIAGNOSIS)] == "yes", 1, 0)
+
+d %>% select(matches("DIAGNOSIS")) %>% unique()
+d %>% 
+  select(matches("DIAGNOSIS")) %>%
+  group_by(DIAGNOSIS) %>% 
+  summarise(count=  n())
+# DIAGNOSIS            count
+# 1 cannot be determined   264
+# 2 no                    2339
+# 3 yes                  12602
+# 4 NA                      70
+```
+
+## remove records DIAGNOSIS_binary == 0
+```{r}
+
+d <- d %>%
+  filter(DIAGNOSIS_binary== 1)
+
+```
+
+```{r, look at dims}
+check_dims()
+# dims : 12602 265
+# n_patIDs             3693
+# n_patID_eyes         7386
+# n_observations      12602
+# n_patIDs_w_gr_1_vis   516
+```
+
+```{r}
+sum(  ( !is.na(d$cirrus_MT01) |  !is.na(d$stratus_MT01)  ) &  !is.na(d$spectralis_MT01)) 
+# 157 >> 583  >>575
+sum(!is.na(d$cirrus_MT01) &  !is.na(d$stratus_MT01) ) 
+# 197 >> 197 >>197
+sum(!is.na(d$spectralis_MT01) &  !is.na(d$stratus_MT01) ) 
+# 92 >> 297>> 291
+sum(!is.na(d$spectralis_MT01) &  !is.na(d$cirrus_MT01) ) 
+# 73 >> 294>> 292
+```
+
+## any duplicates?
+```{r}
+
+d %>% 
+  group_by(patID, eye_num, visitID, DATE_coalsced) %>% 
+  filter(n()>1)
+
+```
+
+```{r, look at dims}
+check_dims()
+# dims : 12602 265
+#                      [,1]
+# n_patIDs             3693
+# n_patID_eyes         7386
+# n_observations      12602
+# n_patIDs_w_gr_1_vis   516
+```
+
+## try numeric
+```{r}
+
+d <- d %>% 
+  mutate(across(-matches("pat|vis"), as_numeric_if_possible))
+
+```
+
+
+#__________________
+## How distributed are patients across visits?
+### how many patients per visits
+```{r }
+
+# plot count of patients at each visit
+available_visit_count_d <- d %>%
+  group_by(visitID) %>%
+  summarize(visit_count = sum(!is.na(visitID)))
+
+available_visit_count_d$visitID <- as.factor(available_visit_count_d$visitID)
+
+# divide by two becasue two records, 1 for each eye, for 1 patient which makes double visitIDs
+available_visit_count_d$visit_count <- available_visit_count_d$visit_count / 2
+
+visits_plot <- ggplot(available_visit_count_d, aes(y = visitID, x = visit_count, fill = visitID))+
+  geom_bar(orientation = "y", stat = "identity", show.legend = FALSE)+
+  geom_text(aes(label = visit_count), vjust = -0.5, hjust = 1, cex = 5) +
+  ggtitle("Count of patients at each visit")+
+  theme_bw()+
+  theme(axis.text.y = element_text(size = 20))
+visits_plot
+
+ggsave(paste0(wd_path, "results/visit_missingness_analysis/visits_plot.png") , visits_plot, width = 10 , height = 14, dpi = 200)
+
+``` 
+> 000 012 024 036, etc., have most visits--\> 12 month increments
+
+### how many visits per patient, what visits?
+```{r}
+
+patient_visit_l <- list()
+
+# for each patient, grab what visits they had
+for (pat in unique(d$patID)){
+
+  # unique visits for each patient
+  pat_visits <- unique(d$visitID[d$patID == pat & !is.na(d$eye_num)] )
+
+  patient_visit_l[[pat]] <- pat_visits
+}
+
+# visualize how many visits for each patient
+pat_visit_count_d <- data.frame(patient = rep(NA, length(patient_visit_l)), num_visits = rep(NA, length(patient_visit_l)))
+
+
+# make a df of patients and the count of how many visits they had
+for (i in 1:length(patient_visit_l)){
+
+  pat_visit_count_d[i, ] <- data.frame(patient  = patient_visit_l[i] %>% names(),
+                           num_visits = patient_visit_l[[i]] %>% length())
+
+}
+pat_visit_count_d <- pat_visit_count_d %>%
+  arrange(num_visits)
+
+ggplot(pat_visit_count_d,  aes( x = num_visits))+
+  geom_bar()+
+  # geom_density( )+
+  scale_x_continuous(breaks = rep(0:10, 1))+
+  ggtitle("Count of patients having a certain number of visit")
+
+
+
+```
+
+## Heatmap of patients x visit
+```{r eval = FALSE, include = FALSE}
+
+# for patient of patient_visit_l, make row, if visit exists TRUE else FALSE
+m <- matrix(dimnames = list(unique(d$patID), unique(d$visitID)),nrow = length(unique(d$patID)), ncol = length(unique(d$visitID)))
+
+# dataframe to order visitIDs by month number
+visitID_order <- data.frame(visitID = unique(d$visitID), 
+                            visitID_num = gsub("\\D", "", unique(d$visitID)) %>% 
+                                                 as.numeric()
+                            ) 
+# if empty make NA, arrange by inbcreasing month
+visitID_order <- visitID_order %>% 
+  mutate(visitID_num  = visitID_num %>% ifelse(.== "", NA, .)) %>% 
+  arrange(visitID_num)
+
+vis_levels <- visitID_order$visitID
+m <- m[, vis_levels]
+
+# levels of visit order from previous hard-coded ordering
+d$visitID <- factor(d$visitID, levels = vis_levels)
+
+
+## fill matrix with patient's presence at visit
+for(i in 1:nrow(m)){
+  pat = rownames(m)[i]
+  pat_visits <- unique(d$visitID[d$patID == pat])
+
+  for(j in 1:ncol(m)){
+    m[i, j] <- ifelse(colnames(m)[j] %in% pat_visits, 1, 0)
+  }
+}
+
+m <- m %>%
+  as.data.frame() %>%
+  as.matrix()
+
+pdf(paste0(wd_path, "results/visit_missingness_analysis/patient_presence_at_visit_heatmap.pdf"), height = 10, width = 10)
+Heatmap(m,
+        show_heatmap_legend = TRUE,
+        use_raster = F,
+        column_title  = "Patient presence at each visit (1 = present)",
+        row_title  = "patient",
+        name = "observed",
+        col = c("white" ,  "black"),
+        na_col = "white",
+        cluster_rows = FALSE,
+        cluster_columns = FALSE,
+        show_row_names = FALSE,
+        show_column_names  = TRUE,
+        column_names_rot = 45
+)
+dev.off()
+
+```
+
+## sankey plot showing patient path from visit to next
+```{r eval = FALSE, include = FALSE }
+
+# Convert matrix to data frame and gather it into a long format
+df_long <- as.data.frame(m) %>%
+  rownames_to_column(var = "patient") %>%
+  gather(key = "visit", value = "present", -patient)
+
+# Filter out the rows where the patient was not present
+df_present <- df_long %>%
+  filter(present == 1) %>%
+  arrange(patient, visit)
+
+# Create a sequence ID for each patient's visit
+df_present <- df_present %>%
+  group_by(patient) %>%
+  mutate(visit_sequence = row_number()) %>%
+  ungroup()
+
+# Create links by joining the table with itself on patient and the sequence
+links <- df_present %>%
+  left_join(df_present, by = "patient",  relationship = "many-to-many") %>%
+  filter(visit_sequence.y == visit_sequence.x + 1) %>%
+  select(source = visit.x, target = visit.y, value = 1)
+
+# Aggregate the links to count the number of patients with the same path
+links <- links %>%
+  group_by(source, target) %>%
+  summarise(value = n()) %>%
+  ungroup()
+
+# Nodes data frame with unique visits
+nodes <- data.frame(name=unique(c(as.character(links$source), as.character(links$target))))
+
+# Assign IDs to nodes
+nodes$id <- 0:(nrow(nodes) - 1)
+
+# Convert node names to IDs in the links dataframe
+links <- links %>%
+  left_join(nodes, by = c("source" = "name"))
+
+links$source_id <- links$id
+links$id <- NULL
+
+links <- links %>%
+  left_join(nodes, by = c("target" = "name"))
+
+links$target_id <- links$id
+links$id <- NULL
+
+links <- links %>%
+  select(source = source_id, target = target_id, value)
+
+# The nodes and links dataframes are now ready to be used in a sankey plot function
+
+
+s <- sankeyNetwork(Links = links, Nodes = nodes ,
+                            Source = "source", Target = "target",
+                            Value = "value", NodeID = "name")
+s <- onRender(s, "
+    function(el, x, data) {
+      var svg = d3.select(el).select('svg');
+      var g = svg.select('.chart');
+
+      // Define zoom behavior
+      var zoom = d3.zoom()
+        .scaleExtent([1, 8]) // Set scale limits
+        .on('zoom', zoomed);
+
+      // Zoom function
+      function zoomed() {
+        g.attr('transform', d3.event.transform);
+      }
+
+      svg.call(zoom);
+
+      // Disable double-click zoom
+      svg.on('dblclick.zoom', null);
+    }
+  ")
+
+# Save to an HTML file if needed
+saveNetwork(s, file = paste0(wd_path, 'results/visit_missingness_analysis/sankeyNetwork.html'))
+```
+
+## do patients who have mactel ever not have mactel at past visits?
+is diagnosis consistent?
+
+### each patient's diagnosis at each visit
+```{r}
+
+# # max diagnosis of each patient at each visit
+# diagnosis_m <- d %>%
+#   select(visitID, patID, DIAGNOSIS_binary) %>%
+#   group_by(patID, visitID) %>%
+#   summarize(diagnosis = max(DIAGNOSIS_binary)) %>%
+#   ungroup() %>%
+#   pivot_wider(names_from = visitID, values_from = diagnosis, values_fill = list(diagnosis = NA)) %>%
+#   column_to_rownames( var = "patID")
+
+
+d %>%
+  select(visitID, patID, DIAGNOSIS_binary) %>%
+  group_by(patID, visitID) %>%
+  summarize(diagnosis = max(DIAGNOSIS_binary)) %>%
+  ungroup() %>% 
+  ggplot( aes(x = visitID, y = diagnosis, group = patID))+
+  geom_line(show.legend = FALSE)+
+  theme_bw()
+
+```
+> patients that start as 1/0 continue as 1/0
+
+# MT colsums
+```{r}
+d %>% 
+  select(matches("MT0\\d$")) %>% 
+  mutate_all(~as.numeric(!is.na(.))) %>% 
+  colSums() %>% 
+  as.data.frame() %>% 
+  rownames_to_column("variable") %>% 
+  rename_with(~c("variable", "count_observed")) %>% 
+  mutate(machine = gsub("_MT0\\d", "", variable), 
+         zone = gsub("\\D", "", variable) ) %>% 
+  ggplot(aes(machine, count_observed, fill =  zone)) +
+    geom_bar(stat = "identity", position = "dodge")
+ggsave(paste0(wd_path, 'results/visit_missingness_analysis/MT_colsums.png'), height = 10, width =10)
+
+```
+
+#______________________
+# VisitIDs with new dates
+
+## Baseline visits
+```{r}
+baseline_pats <- d %>%
+ filter(visitID == "Baseline") %>%
+ pull(patID)
+
+x <- d[d$patID %in% baseline_pats , ]
+
+# do these patients also have a visit 0?
+for(pat in baseline_pats) print(as.character(unique(d$visitID[d$patID == pat])))
+#  
+```
+> no baseline pats in this version of the dataset
+
+### remove baseline visit rows
+```{r}
+d <- d[d$visitID != "Baseline"  ,  ]
+
+d$visitID %>% levels()
+```
+
+## 6month visit
+```{r, eval = FALSE}
+
+d[d$visitID == "6 Months", ] %>% glimpse()
+
+d %>% 
+  filter(patID =="018002") %>% 
+  select(visitID, matches("DT|Date", ignore.case = TRUE)) %>% 
+  arrange(visitID) %>% 
+  filter(visitID %in% c("006", "6 Months")) %>% 
+  glimpse()
+
+
+
+m <- d[d$visitID == "6 Months", ] %>%
+  mutate_all(~ifelse(is.na(.), 0, 1)) %>%
+  as.matrix()
+
+
+Heatmap(m,
+        show_heatmap_legend = TRUE,
+        use_raster = F,
+        column_title  = "dates",
+        # row_title  = "",
+        col = c("white" ,  "black"),
+        na_col = "white",
+        cluster_rows = FALSE,
+        cluster_columns = FALSE,
+        show_row_names = FALSE,
+        show_column_names  = TRUE,
+        # column_names_rot = 45,
+        # column_names_gp = gpar(fontsize = 3)
+        row_names_gp = gpar(fontsize = 3)
+)
+
+# look at patient with this visit
+m <- d[d$patID == "018002", ] %>%
+  mutate_all(~ifelse(is.na(.), 0, 1)) %>%
+  as.matrix()
+
+Heatmap(m,
+        show_heatmap_legend = TRUE,
+        use_raster = F,
+        # row_title  = "",
+        col = c("white" ,  "black"),
+        na_col = "white",
+        cluster_rows = FALSE,
+        cluster_columns = FALSE,
+        show_row_names = FALSE,
+        show_column_names  = TRUE,
+        # column_names_rot = 45,
+        # column_names_gp = gpar(fontsize = 3)
+        row_names_gp = gpar(fontsize = 3)
+)
+
+# > only dates and DEM for 6 Month visit
+
+# remove 6 Month row
+
+d <- d[d$visitID != "6 Months",]
+
+```
+
+## 000S visit
+```{r, eval = FALSE}
+d[d$visitID == "000S", ] %>% glimpse()
+
+d <- d[d$visitID != "000S" , ]
+```
+> no visit 000S in this data
+
+
+## what are unsch and 084S?
+## 084S
+```{r, eval = FALSE}
+m <- d[d$visitID == "084S", ] %>%
+  # select(stratus_SCANDT, SCANDT_period_year) %>%
+  mutate(across(everything(),
+                ~ifelse(is.na(.), 0,1)
+                )) %>%
+  filter(rowSums(across(everything())) != 0) %>%
+  as.matrix()
+
+Heatmap(m,
+        cluster_rows = FALSE,
+        cluster_columns = FALSE,
+        col = c("white", "black"))
+
+```
+> not in this version
+
+### removing records at 084S
+```{r, eval = FALSE}
+
+d[d$visitID == "084S" , ]
+d <- d[d$visitID != "084S" , ]
+
+```
+> not in this version
+
+
+## unsch
+```{r}
+
+d[d$visitID %in% grep("unsch", d$visitID, value = TRUE), ]  %>% glimpse()
+# d[d$visitID == "000usch", ]   %>% glimpse()
+
+
+m_d <- d[d$visitID %in% grep("unsch", d$visitID, value = TRUE), ] %>%
+  mutate(visitID_unique = make.unique(as.character(visitID))) %>%
+  arrange(visitID_unique)
+
+rownames(m_d) <- NULL
+rownames(m_d) <- m_d$visitID_unique
+
+m <- mice::md.pattern(m_d, plot = FALSE)
+m <- m[-nrow(m), -ncol(m)]
+
+Heatmap(m ,
+        show_heatmap_legend = TRUE,
+        use_raster = F,
+        column_title  = "data of unsch visits (1 = observed)",
+        # row_title  = "",
+        col = c("white" ,  "black"),
+        na_col = "white",
+        cluster_rows = FALSE,
+        cluster_columns = FALSE,
+        show_row_names = TRUE,
+        show_column_names  = TRUE,
+        # column_names_rot = 45,
+        # column_names_gp = gpar(fontsize = 3)
+        row_names_gp = gpar(fontsize = 3)
+)
+
+```
+> MT, cf, and fafgrade data
+
+### all patients' visit history
+```{r}
+
+# plot order of visits and dates visited by patients
+ggplot(d, aes(x = DATE_coalsced, y = visitID, group = patID)) +
+  geom_line(show.legend = FALSE, alpha = .2) +
+  geom_point(show.legend = FALSE, alpha = .2) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45))+
+  scale_x_date()+
+  labs(title = "All Patients' Visit Timeline")
+
+```
+
+
+### unsch patients visit history plot
+```{r}
+
+pats_with_unsch <- d$patID[ (d$visitID == "000unsch") & !is.na(d$DATE_coalsced)]
+
+plotting_d <- subset(d, patID %in% pats_with_unsch) %>%
+  select(DATE_coalsced, visitID, patID) %>%
+  unique()
+
+ggplot(plotting_d, aes(x = DATE_coalsced, y = visitID, group = patID, color = patID)) +
+  geom_line(show.legend = FALSE, alpha = 0.4) +
+  geom_point(show.legend = FALSE, alpha = 0.4) +
+  theme_bw() +
+  labs(x = "Visit ID", y = "DATE_coalsced", title = "Patient Visit Timeline for patients with 000unsch") +
+  # scale_x_discrete(limits = c(levels(d$DATE_coalsced)[1], levels(d$DATE_coalsced)[length(levels(d$DATE_coalsced))]),
+  #               date_breaks = "2 months", date_labels = "%Y-%m") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  geom_label_repel(aes(label = as.character(DATE_coalsced)),
+                   nudge_y = 0.1,
+                   size =5,
+                   angle = 45,
+                   max.overlaps = Inf,
+                   box.padding = 0.1,
+                   show.legend = FALSE,
+                   label.size = 0.5
+                   )
+
+# ggsave(paste0(wd_path, "results/visit_missingness_analysis/unsch_patients_visits_dates.png"), height = 7, width = 15)
+# unsch_ggplotly <- ggplotly(unsch_plot)
+# 
+# htmlwidgets::saveWidget(unsch_ggplotly, paste0(wd_path, "results/visit_missingness_analysis/unsch_patients_visits_dates.html"))
+
+```
+> most 000unsch visits are 6 mo after previous visit ==> change 000unsch to 006 for 000unsch betwen 3 and 9 months away from previous visit
+
+#### change unsch to months from visit 000
+```{r}
+
+# PATIENTS WHO HAVE UNSCH VISIT
+pats_with_unsch 
+
+# # nth_period_year <- d$SCANDT_period_year %>% levels()
+# # first_period_year <- d$SCANDT_period_year %>% levels() 
+# ##
+# # function to take period_year and find difference in months from first visit
+# convert_period_year_to_date <- function(period_year, year_divisor = 19){
+#   
+#   # parse years and periods from first and nth dates
+#   year <- sapply(strsplit(period_year, "-"), "[", 2) %>% as.numeric()
+#   period <- sapply(strsplit(period_year, "-"), "[", 1)%>% as.numeric()
+# 
+#   # convert period to day of year
+#   period_day <- period * year_divisor
+#   
+#   # convert day and year to date
+#   date <- as.Date(period_day - 1, origin = paste0(year,"-01-01"))
+#   
+#   return(date)
+# }
+# 
+# ## TEST PERIOD_DAY CONVERSION AND INTERVAL CALCULATION ## 
+# dates.1 <- paste(rep(1:year_divisor, 2), 2000:2039, sep = "-")
+# dates.2 <- paste(rep(2:18, 2), 2001:2040, sep = "-")
+# data.frame(
+#   dates.1 = convert_period_year_to_date(dates.1),
+#   dates.2 = convert_period_year_to_date(dates.2),
+#   diff_months = interval( convert_period_year_to_date(dates.1), convert_period_year_to_date(dates.2)) %/% months(1)
+# )
+# ##  ##  ## 
+
+# if unscheduled visit calculate months from first visit date
+unsch_new_visitID_d <- d %>%
+  select(patID_eye,  patID,visitID, DATE_coalsced) %>%
+  unique() %>%
+  filter(patID %in% pats_with_unsch) %>%
+  arrange(patID, visitID) %>%
+  group_by(patID_eye) %>%
+  # mutate(first_period_year = dplyr::first(DATE_coalsced)) %>%
+  # mutate(new_visitID =
+  #          ifelse( visitID %in% grep("unsch", d$visitID, value = TRUE),
+  #                  interval( convert_period_year_to_date(as.character(first_period_year)),
+  #                            convert_period_year_to_date(as.character(DATE_coalsced))
+  #                            ) %/% months(1) ,
+  #                  visitID
+  #                  )
+  #        ) %>% 
+  # select(-first_period_year)
+  mutate(first_DATE_coalsced = dplyr::first(DATE_coalsced) ) %>% 
+  mutate(new_visitID = 
+           ifelse( visitID %in% grep("unsch", d$visitID, value = TRUE), 
+                   interval(first_DATE_coalsced, DATE_coalsced) %/% months(1), 
+                   NA
+                   )
+         ) %>% 
+  ungroup() %>% 
+  select(- first_DATE_coalsced)
+
+# look at how they relate
+left_join(d, unsch_new_visitID_d) %>% 
+  select(patID, eye_num, visitID,new_visitID, DATE_coalsced, matches("DATE")) %>% 
+  filter(patID %in% pats_with_unsch) %>% 
+  arrange(patID, eye_num, visitID) %>% 
+  print(n = 100)
+  
+
+# join new visitIDs to main
+d <- left_join(d, unsch_new_visitID_d)
+
+# if newVisitID present, set old to new and make 3 char long
+d <- d %>%
+  # if there's a newvisitID, change original
+  mutate(visitID = as.character(visitID)) %>% 
+  mutate(visitID = ifelse(!is.na(new_visitID), as.character(new_visitID), visitID)) %>%
+  mutate(visitID =
+        case_when(
+          nchar(visitID) < 2 ~ paste0("00", visitID),
+          nchar(visitID) < 3 ~ paste0("0", visitID),
+          TRUE ~ visitID
+  )) %>% 
+  select(-new_visitID)
+
+# update vis_levels
+numeric_vis <- d$visitID %>% grep("\\d", ., value = TRUE) %>% unique()
+numeric_vis <- numeric_vis[order(numeric_vis)]
+
+nonNumeric_vis <- d$visitID %>% grep("\\D", ., value = TRUE) %>% unique()
+nonNumeric_vis  <- setdiff(nonNumeric_vis, numeric_vis)
+
+vis_levels <- c(numeric_vis, nonNumeric_vis)
+
+all(vis_levels %in% d$visitID ) # good if TRUE
+all(d$visitID%in% vis_levels )  # good if TRUE
+
+d$visitID <-  factor(d$visitID, levels = vis_levels)
+
+
+```
+
+
+##### re-plot after fixing unsch
+```{r}
+
+# patients with SCANDT_period_year
+g <- d[!is.na(d$DATE_coalsced),  ] %>%
+  arrange( patID, visitID,DATE_coalsced)
+
+# plot order of visits and dates visited by patients
+ggplot(g, aes(x = DATE_coalsced, y = visitID, group = patID, color = patID)) +
+  geom_line(show.legend = FALSE, alpha = .4) +
+  geom_point(show.legend = FALSE, alpha = .4) +
+  theme_minimal() +
+  labs(x = "Visit ID", y = "Scan Date", title = "All Patients' Visit Timeline after fixing unscheduled visitIDs")
+
+```
+
+# remove unscheduled and control visits
+```{r}
+
+# where visitID has unsch or S remove row
+bad_visits <- grep("unsch|\\dS|control", d$visitID, ignore.case = TRUE, value = TRUE) %>% unique()
+bad_visits
+
+# d[d$visitID %in% bad_visits , ] %>% nrow() # removes 224 rows if leaving the unsch visits
+# d <-d[!d$visitID %in% bad_visits , ]
+
+d[d$visitID == "control" ,] %>% nrow()
+# d <- d[!d$visitID == "control" ,]
+```
+> all bad visits fixed
+> controls already removed
+
+```{r, look at dims}
+
+check_dims()
+# dims : 12600 265
+#                      [,1]
+# n_patIDs             3693
+# n_patID_eyes         7386
+# n_observations      12600
+# n_patIDs_w_gr_1_vis   516
+
+### MARCH 11 2025 ###
+# dims : 12619 260
+#                      [,1]
+# n_patIDs             4034
+# n_patID_eyes         8063
+# n_observations      12617
+# n_patIDs_w_gr_1_vis   500
+
+# # compare old to current names
+# old <- readRDS(sprintf("%sprocessed_data/CF_FFA_DEM_DIAGNOSIS_ENRNHOR_ENRNHOS_FAFGRADE_FAMSTATUS_MH_OCTMAIN_OCTMTCIRRUS_OCTMTSPECTRALIS_OCTMTSTRATUS_VAA_lea_01.rds",str_replace(wd_path,"14", "13") ))
+# new <- readRDS(sprintf("%sprocessed_data/CF_FFA_DEM_DIAGNOSIS_ENRNHOR_ENRNHOS_FAFGRADE_FAMSTATUS_MH_OCTMAIN_OCTMTCIRRUS_OCTMTSPECTRALIS_OCTMTSTRATUS_VAA_lea_01.rds",wd_path ))
+# 
+# 
+# setdiff(
+#   names(old),
+#   names(new)
+# )
+# setdiff(
+#   names(new),
+#   names(old)
+# )
+
+```
+
+# look at missingness
+### make barplot of where each bar is count of filled cells for that column
+```{r }
+
+# make dataframe binary
+df_binary <- d %>%
+  mutate(month = as.numeric(visitID)) %>%
+  arrange(month) %>%
+  mutate_all(~ifelse(is.na(.), 0, 1))
+
+# # plot where observed for cols in d ####
+# pdf(paste0(wd_path, "results/visit_missingness_analysis/available_data_ordered_visits.pdf"), height = 30, width = 30, )
+# Heatmap(df_binary %>% as.matrix(),
+#         show_heatmap_legend = TRUE,
+#         use_raster = F,
+#         column_title  = "",
+#         row_title  = "observations",
+#         # col = c( "black",  "white" ),
+#         col = c("white",   "black"), # 0 , 1
+#         # na_col = "white",
+#         cluster_rows = FALSE,
+#         cluster_columns = FALSE,
+#         show_row_names = FALSE,
+#         show_column_names  = TRUE,
+#         # column_names_rot = 45,
+#         column_names_gp = gpar(fontsize = 5)
+# )
+# dev.off()
+
+df_binary_colsums <- colSums(df_binary) %>%
+  as.data.frame() %>%
+  rownames_to_column("variable") %>%
+  rename_with(~c("variable", "count_present"))
+
+
+
+# label max !NA count
+max_observed <- max(df_binary_colsums$count_present)
+
+df_binary_colsums$order <- order(df_binary_colsums$count_present)
+
+# mds <- cmdscale(dist(t(df_binary))) %>% 
+#   as.data.frame()
+# 
+# mds$variable <- rownames(mds)
+#   
+# plot(mds[,1:2], type = "n"); text(mds[,1:2], label = mds$variable)
+# 
+# km <- kmeans(mds[,1:2], 8)
+
+
+# cor_mat <- cor(select(d, where(is.numeric)), use = "pairwise.complete.obs")
+# 
+# # Compute missingness pattern correlation
+# miss_mat <- as.matrix(is.na(select(d, where(is.numeric))))  # Missingness matrix
+# miss_cor <- cor(miss_mat)  # Pairwise missingness correlation
+# 
+# # Combine correlation and missingness patterns
+# dist_mat <- as.dist(1 - abs(cor_mat)) + as.dist(1 - abs(miss_cor))
+# 
+# Heatmap(as.matrix(dist_mat), cluster_rows = F, cluster_columns = F)
+# 
+# clust <- hclust(dist_mat, method = "ward.D2")
+# 
+# hc <- hclust(dist(t(df_binary)))
+# 
+# # df_binary_colsums$group = factor(km$cluster)
+# df_binary_colsums$group = factor(cutree(hc, 12))
+
+## plot ####
+ggplot(df_binary_colsums, aes(x = factor(variable, levels = df_binary_colsums$variable[order]), y = count_present, fill = variable))+
+  geom_bar(stat = "identity", show.legend = FALSE)+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle("Counts non-missing")
+  
+ggsave(paste0(wd_path, "results/visit_missingness_analysis/observed_colsums.png"), height = 10, width = 20 )
+
+# ggplot(df_binary_colsums, aes(x = count_present, y = variable, fill = variable))+
+#   geom_bar(stat = "identity", show.legend = FALSE, orientation = "y")+
+#   theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# df_binary_colsums$variable <- factor(df_binary_colsums$variable, levels = df_binary_colsums$variable)
+```
+> substantially less vaa because not joining on visitID
+
+
+#### order variables by dataset and update info with it
+```{r, eval = FALSE}
+
+# df of datasets and patterns for variables
+info_sub <- info %>% 
+  select(dataset, shorthand) %>% 
+  arrange(dataset) %>% 
+  mutate(shorthand = shorthand %>%   gsub("\\[1-9\\]", "", .)) # remove the number bits
+  
+# for each shorthand, grab variables associated with it (orders variables by dataset)
+ordered_variables <- sapply(info_sub$shorthand, function(search_string){
+  variables <- grep(search_string, df_binary_colsums$variable, value = TRUE)
+  return(variables)
+}, USE.NAMES = TRUE) %>% 
+  unlist(., use.names = FALSE)
+
+# add teh remainder of variables to beginning, they're out of order
+all_variables <- c(setdiff(names(d), ordered_variables), ordered_variables) %>% 
+  unique()
+all(names(d) %in% all_variables) # Good = TRUE
+all(all_variables %in% names(d)) # Good = TRUE
+
+
+# match df to variable
+ordering_df <- data.frame(dataset = NA, 
+                          variable = all_variables)
+
+# for each pattern in info, grab dataset and fill ordering df
+for(i in 1:nrow(info_sub) ){
+  
+  # what dataset is associated with this search
+  search <- info_sub[i, 2]
+  
+  # if search doesnt have 0 at end add $ because full name, no more in string
+  if(substr(search, nchar(search), nchar(search)) != "0") search = paste0(search, "$") 
+  
+  datasets <- info_sub$dataset[ grep(search, info_sub$shorthand) ]
+  print(paste(datasets, " ⭄  " ,search))
+  dataset <- datasets %>% 
+    paste(., collapse = "/")
+  
+  # fill dataset column in ordering df for rows that match this search
+  ordering_df$dataset[ grep(search, ordering_df$variable)] <- dataset
+  
+}
+
+# check that greping the right ones
+  # table(c(
+  # grep("RW0|RW1|TCV|AXIS|ACU|LOG|CYL|SPH|SNEL|VAA", ordering_df$variable, value = TRUE),
+  # grep("FAF", ordering_df$variable, value = TRUE),
+  # grep("CFF|FFA|CF|^QUAL", ordering_df$variable, value = TRUE),
+  # grep("OCT|BLR|CTRPO", ordering_df$variable, value = TRUE),
+  # grep("stratus", ordering_df$variable, value = TRUE),
+  # grep("spectralis", ordering_df$variable, value = TRUE),
+  # grep("DIAGNOSIS|GENDER|ETHN|YROF|RACE|month|EYE|pat|^VIS|subj", ordering_df$variable, value = TRUE),
+  # grep("FAM", ordering_df$variable, value = TRUE),
+  # grep("ENR|RELAT", ordering_df$variable, value = TRUE),
+  # grep("DM|WGT|HGT", ordering_df$variable, value = TRUE)
+  # ))
+
+#### MANUALLY ENTER THE REMAINDER'S NOT HAVING A SHORTHAND IN INFO_SUB ###
+ordering_df$variable[is.na(ordering_df$dataset)]
+
+ordering_df$variable[ grepl("RW0|RW1|TCV|AXIS|ACU|LOG|CYL|SPH|SNEL|VAA|TCV|VISNO", ordering_df$variable)]
+ordering_df$dataset[ grepl("RW0|RW1|TCV|AXIS|ACU|LOG|CYL|SPH|SNEL|VAA|TCV|VISNO", ordering_df$variable)& is.na(ordering_df$dataset)] <-  "VAA"
+ordering_df$variable[is.na(ordering_df$dataset)]
+
+ordering_df$variable[ grepl("FAF", ordering_df$variable)]
+ordering_df$dataset[ grepl("FAF", ordering_df$variable)& is.na(ordering_df$dataset)] <-  "FAF"
+ordering_df$variable[is.na(ordering_df$dataset)]
+
+ordering_df$variable[ grepl("CFF|FFA|CF|^QUAL", ordering_df$variable)]
+ordering_df$dataset[ grepl("CFF|FFA|CF|^QUAL", ordering_df$variable)& is.na(ordering_df$dataset)] <-  "CF_FFA"
+ordering_df$variable[is.na(ordering_df$dataset)]
+
+ordering_df$variable[ grepl("OCT|BLR|CTRPO", ordering_df$variable) & !grepl("STRAT|SPEC", ordering_df$variable)]
+ordering_df$dataset[ grepl("OCT|BLR|CTRPO", ordering_df$variable) & !grepl("STRAT|SPEC", ordering_df$variable) & is.na(ordering_df$dataset)] <-  "OCTMAIN"
+ordering_df$variable[is.na(ordering_df$dataset)]
+
+ordering_df$variable[ grepl("stratus", ordering_df$variable, ignore.case = TRUE)]
+ordering_df$dataset[ grepl("stratus", ordering_df$variable,ignore.case = TRUE)& is.na(ordering_df$dataset)] <-  "Macular_Thickness_OCT_Stratus"
+ordering_df$variable[is.na(ordering_df$dataset)]
+
+ordering_df$variable[ grepl("cirrus", ordering_df$variable,ignore.case = TRUE)]
+ordering_df$dataset[ grepl("cirrus", ordering_df$variable,ignore.case = TRUE)& is.na(ordering_df$dataset)] <-  "Macular_Thickness_OCT_Cirrus"
+ordering_df$variable[is.na(ordering_df$dataset)]
+
+ordering_df$variable[ grepl("spectralis", ordering_df$variable,ignore.case = TRUE)]
+ordering_df$dataset[ grepl("spectralis", ordering_df$variable,ignore.case = TRUE)& is.na(ordering_df$dataset)] <-  "Macular_Thickness_OCT_Spectralis"
+ordering_df$variable[is.na(ordering_df$dataset)]
+
+ ordering_df$variable[ grepl("DIAGNOSIS|GENDER|ETHN|YROF|RACE|month|EYE|patI|^VIS|subj", ordering_df$variable, ignore.case = TRUE)]
+ordering_df$dataset[ grepl("DIAGNOSIS|GENDER|ETHN|YROF|RACE|month|EYE|pat|^VIS|subj", ordering_df$variable, ignore.case = TRUE) & is.na(ordering_df$dataset)] <-  "DIAGNOSIS/DEM/other"
+ordering_df$variable[is.na(ordering_df$dataset)]
+
+
+ordering_df$variable[ grepl("FAM", ordering_df$variable, ignore.case = TRUE) & is.na(ordering_df$dataset)] 
+ordering_df$dataset[ grepl("FAM", ordering_df$variable, ignore.case = TRUE) & is.na(ordering_df$dataset)] <-  "FAMSTATUS"
+ordering_df$variable[is.na(ordering_df$dataset)]
+
+ordering_df$variable[ grepl("ENR|RELAT", ordering_df$variable, ignore.case = TRUE) & is.na(ordering_df$dataset)] 
+ordering_df$dataset[ grepl("ENR|RELAT", ordering_df$variable, ignore.case = TRUE) & is.na(ordering_df$dataset)] <-  "ENR"
+ordering_df$variable[is.na(ordering_df$dataset)]
+
+ordering_df$variable[ grepl("DM|WGT|HGT", ordering_df$variable, ignore.case = TRUE) & is.na(ordering_df$dataset)] 
+ordering_df$dataset[ grepl("DM|WGT|HGT", ordering_df$variable, ignore.case = TRUE) & is.na(ordering_df$dataset)] <-  "DM"
+ordering_df$variable[is.na(ordering_df$dataset)]
+
+ordering_df$variable[is.na(ordering_df$dataset)]
+ordering_df$dataset[is.na(ordering_df$dataset)] <- "other"
+ordering_df$variable[is.na(ordering_df$dataset)]
+
+
+all(ordering_df$variable %in% names(d)) # good if TRUE
+all(names(d) %in% ordering_df$variable)# good if TRUE
+
+# join info and ordering df 
+info_joined <- full_join(ordering_df, info, by = join_by(variable ==  shorthand))
+
+# where not missing in y make dataset.x y
+info_joined$dataset.x[!is.na(info_joined$dataset.y)] <-  info_joined$dataset.y[!is.na(info_joined$dataset.y)]
+
+info_joined$dataset.y <- NULL
+names(info_joined)[which(names(info_joined) == "dataset.x")] <- "dataset"
+
+# for rows e.g "LRT[1-9] copy that info to LRT01...LRT09
+## row value with info and pattern to search and fill in df
+shorthand_pattern_df <- data.frame(shorthand=  grep("\\[1-9\\]", info_joined$variable, value = TRUE) ,
+                                   pattern = grep("\\[1-9\\]", info_joined$variable, value = TRUE) %>% 
+                                     gsub("\\[1-9\\]", "\\\\d", .)
+                                   )  
+# for each shorthand, fill rows with corresponding pattern with missing info
+# i = 5
+for(i in 1:nrow(shorthand_pattern_df)){
+
+  shorthand <- shorthand_pattern_df[i, 1]
+  pattern <- shorthand_pattern_df[i, 2]
+  
+  info_joined[grep(pattern, info_joined$variable), c(3:ncol(info_joined))] <- info_joined[info_joined$variable == shorthand, c(3:ncol(info_joined))]
+  
+  
+}
+
+
+# more info cleaning ----  
+
+# fix octmain dataset values
+info_joined <- info_joined %>% 
+  mutate(dataset= dataset %>% 
+           ifelse(. == "OCT_Main", "OCTMAIN", .)
+           )
+
+# remove shorthand rows
+info_joined <- info_joined[!grepl("\\[1-9\\]", info_joined$variable) , ]
+
+# remove octmain fovabnorm row: keep d where where not octmain and fovabnorm
+info_joined <- info_joined[!(info_joined$dataset == "OCTMAIN" & info_joined$variable == "FOVABNORM")  ,  ]
+
+# remove octmain fovabnorm row: keep d where where not octmain and fovabnorm
+info_joined <- info_joined[!(info_joined$dataset == "OCTMAIN" & info_joined$variable == "CTR_PT_INVOLV")  ,  ]
+
+
+# make original info updated one
+info <- info_joined %>% 
+  arrange(dataset)
+
+```
+
+#### plot counts of variables in order of dataset
+```{r, eval = TRUE }
+
+# join df_binary_colsums with info datasets
+colsums_ordered <- df_binary_colsums %>% 
+  left_join(., info[, c("name", "table")], by = join_by(variable == name)) 
+
+# unique(info$dataset)
+levels<-c(
+"CF_FFA","FAFGRADE","OCTMTCIRRUS","OCTMTSPECTRALIS",
+"OCTMTSTRATUS","OCTMAIN","VAA","MH/DIAGNOSIS","DEM/ENR/FAM/other"
+)
+
+colsums_ordered$table <- factor(colsums_ordered$table, levels = levels)
+
+colsums_ordered <- colsums_ordered[order(colsums_ordered$table) , ]
+
+colsum_plot <- ggplot(colsums_ordered,aes(count_present, reorder(variable, order(table)), fill = table))+
+  geom_bar(stat = "identity", show.legend = TRUE, orientation = "y", width = .5, just = 0)+
+  theme_light()+
+  theme(axis.text.y = element_text( 
+    size = 7
+    # hjust = 1, vjust = 0,  angle = 90,
+    # margin = margin(t = -100, r = 0, b = 0, l = 0))
+        ))+
+  geom_vline(xintercept = nrow(df_binary), col = "blue", linetype = 2)+
+  annotate("text", y = 1, x = nrow(df_binary), label = paste("nrow(d):", nrow(df_binary)), hjust = 1, vjust = -0.5, color = "blue")
+
+colsum_plot
+ggsave(paste0(wd_path, "results/visit_missingness_analysis/colsum_plot.png"), width = 20  , height = 15, dpi = 150, limitsize = F)
+ 
+### same plot but faceted for visitID ####
+visit_var_count <- d %>%
+  group_by(visitID) %>%
+  mutate(across(all_of(names(d)[names(d) != "visitID"]),
+                ~!is.na(.))
+         ) %>%
+  summarize(across(all_of(names(d)[names(d) != "visitID"]), sum)) %>%
+  reshape2::melt(., id.vars = "visitID") %>%
+  rename_with(~c("visitID", "variable", "count"))
+
+# what visits are not visiless,control, or 000
+follow_ups <- unique( visit_var_count$visitID)[!unique( visit_var_count$visitID) %in% c("000", "VISITLESS", "control")]
+
+visit_var_count <- visit_var_count %>%
+  mutate(visit_group =   case_when(
+    visitID %in% follow_ups ~ ">000",
+    TRUE ~ visitID
+  )) %>% 
+  mutate(visit_group = visit_group %>% factor(., levels = c("000", ">000")))
+
+visit_colsum_plot <- ggplot(visit_var_count, aes(x = variable ,y = count, fill = variable))+
+  geom_bar(stat = "identity", show.legend = FALSE, orientation = "x", width = .5, just = 0)+
+  theme_bw()+
+  theme(axis.text.x = element_text( hjust = 1, vjust = 0, size = 3, angle = 90,
+                                    margin = margin(t = 0, r = 0, b = 0, l = 0)
+                                    )
+        )+
+  coord_cartesian(ylim = c(0, nrow(d)))+
+  geom_abline(intercept = nrow(df_binary), col = "blue", linetype = 2, slope = 0)+
+  annotate("text", x = Inf, y = nrow(df_binary), label = paste("nrow(d):", nrow(df_binary)), hjust = 1, vjust = -0.5, color = "blue")+
+  facet_wrap(~visit_group, scales = "free")
+visit_colsum_plot
+ggsave(paste0(wd_path, "results/visit_missingness_analysis/visit_colsum_plot.png"),visit_colsum_plot, width = 20, height = 15, dpi = 400, limitsize = F)
+
+# for only VAA
+VAA_visit_colsum_plot <- ggplot(visit_var_count %>% filter(variable %in% names(raw$VAA)), aes(y= variable , x = count, fill = variable))+
+  geom_bar(stat = "identity", show.legend = FALSE, orientation = "y", width = .5, just = 0)+
+  theme_bw()+
+  theme(axis.text.y = element_text( hjust = 1, vjust = 0, size = 5, angle = 0,
+                                    margin = margin(t = 0, r = 0, b = 0, l = 0)
+                                    )
+        )+
+  facet_wrap(~visit_group, scales = "fixed", ncol = 4)
+
+ggsave(paste0(wd_path, "results/visit_missingness_analysis/VAA_visit_colsum_plot.png"),VAA_visit_colsum_plot, width = 15, height = 10, dpi = 150, limitsize = F)
+
+```
+
+# what datasets have eye_num missing?
+```{r }
+
+map(raw, ~{x <- .
+  table(x[['eye']], useNA = "always")
+})
+table(d$eye_num, useNA = "always")
+
+
+```
+
+# = = = = = = = = = = = 
+
+# save info
+```{r}
+write.xlsx(info, paste0(wd_path,"processed_data/database_grading_key_02.xlsx"))
+# "~/Documents/LMRI/PRJ2024001/version015/processed_data/database_grading_key_02.xlsx"
+```
+
+# save data
+```{r}
+new_data_name <- data_name %>% 
+  gsub("1", "2", .)
+
+d_path <- paste0(wd_path,"processed_data/", new_data_name)
+print(paste("Saving... \n", d_path))
+saveRDS(d, d_path)
+# ~/Documents/LMRI/PRJ2024001/version015/processed_data/CF_FFA_DEM_DIAGNOSIS_ENRNHOR_ENRNHOS_FAFGRADE_FAMSTATUS_MH_OCTMAIN_OCTMTCIRRUS_OCTMTSPECTRALIS_OCTMTSTRATUS_VAA_lea_02.rds
+```
+
+```{r}
+sum(  ( !is.na(d$cirrus_MT01) |  !is.na(d$stratus_MT01)  ) &  !is.na(d$spectralis_MT01)) # 709 >> 575 >>583
+sum(!is.na(d$cirrus_MT01) &  !is.na(d$stratus_MT01) ) # 201 >> 197>>199
+sum(!is.na(d$spectralis_MT01) &  !is.na(d$stratus_MT01) ) # not recorded >> 291 >>297
+sum(!is.na(d$spectralis_MT01) &  !is.na(d$cirrus_MT01) ) # not recorded >> 292 >> 296
+```
+
+```{r, look at dims}
+check_dims()
+# dims : 12600 265
+# n_patIDs             3693
+# n_patID_eyes         7386
+# n_observations      12600
+# n_patIDs_w_gr_1_vis   516
+
+### MARCH 12 2025 ###
+# dims : 12619 260
+# n_patIDs             4034
+# n_patID_eyes         8063
+# n_observations      12617
+# n_patIDs_w_gr_1_vis   500
+
+```

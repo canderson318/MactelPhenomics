@@ -1,0 +1,311 @@
+Precision Mapping of Retinal Disease: Identification of Differential Progression Trajectories via Imaging Phenomics
+
+
+Authors:
+Christian Anderson 1, Liam Scott 2,3, Irene Leung 4, Ferenc Sallo 5, Catherine Egan 4, Tunde Peto 6, The MacTel Consortium *, Melanie Bahlo 2,3, Martin Friedlander 1,7, Simone Tzaridis1,7, Lea Scheppke 1, Roberto Bonelli 1**
+
+Affiliations:
+1 The Lowy Medical Research Institute, La Jolla, USA 
+2 Genetics and Gene Regulation Division, The Walter and Eliza Hall Institute of Medical Research, Australia
+3 Department of Medical Biology, The University of Melbourne, Australia
+4 Moorfields Eye Hospital, Institute of Ophthalmology, University College London, United Kingdom
+5 Hôpital Ophtalmique Jules-Gonin, Fondation Asile des Aveugles, University of Lausanne, Lausanne, Switzerland
+6 Center for Public Health, Queen’s University Belfast, Belfast, United Kingdom 
+7 The Scripps Research Institute, USA
+
+* The list of contributing investigators is available in Supplementary Table 12.
+** Corresponding author: Roberto Bonelli (rbonelli@lmri.net)
+
+
+Graphical abstract
+
+
+Applying single-cell RNA-seq techniques to large-scale clinical phenotypic data enables the discovery of differential disease progression trajectories and the construction of data-driven progression scores. These can then be integrated into precision medicine studies to investigate the drivers of patient-specific disease outcomes. 
+
+
+
+Abstract
+
+We propose a new framework for the analysis of large clinical phenotypic datasets through the repurposing of single-cell RNA-sequencing analysis techniques. By utilizing similarities between cellular development and clinical heterogeneity, we show that techniques such as clustering, pseudo-time, and trajectory analysis can reveal different disease progression trajectories. Our approach permits the extraction of long-term progression trajectories from large cross-sectional datasets while overcoming the hurdle of a lack of longitudinal data plaguing many large clinical phenotypic studies. We present this framework on the retinal degenerative disease macular telangiectasia type 2 (MacTel) and derived previously unknown differential disease progression trajectories from 87 clinically graded phenotypic variables measured in 7,888 eyes (3,971 patients). One progression trajectory was characterized by vascular alterations, the other by severe neurodegeneration and vision loss. Older and diabetic patients were significantly more likely to progress toward the neurodegenerative route. We demonstrate how pseudo-time calculations reveal a holistic fine-scale data-driven progression score useful for analytical investigations, which complements previously established clinical severity scores. Lastly, integration of genetic data on 71% of patients revealed that genetic background affects phenotype heterogeneity, differential progression trajectory, but not progression rate.
+
+
+Introduction
+
+Many diseases present with complex manifestations of clinical symptoms, often referred to as subtypes. This may also extend to differential disease progression trajectories, with slow and fast progressors. This clinical variability complicates timely diagnosis, reliable prognosis, and precise definitions of disease progression - all essential components for effective disease research, management, and treatment. As patient data exponentially increases, personalised medicine and a molecular understanding of the basis of disease subtypes and progression patterns are becoming increasingly achievable. Disease classification, subtyping, and progression definitions have historically relied largely on endpoints that clinicians consistently categorise as distinct disease subtypes or discrete stages along a linear progression scale.
+
+Clinical phenomics studies are increasing, being driven by the advent of automated imaging analytics tools. These tools can derive novel clinical phenotypes from patient imaging data that previously required time-consuming analysis by experts. As a result, the search for novel, more detailed disease subtypes and the differentiation of progression trajectories has become more prominent. The growing availability of ‘omics data from large disease cohorts and population biobanks has led to increased integration of ‘omics data with the clinical phenome 1–4. Researchers are applying high-dimensional analysis techniques, often pioneered in other areas, to large-scale clinical phenotypic datasets to uncover data-driven disease subtypes and to map progression trajectories. Recent studies have leveraged large datasets and multidimensional analysis techniques to define subtypes of common diseases such as type II diabetes 5, heart failure 6,7, and Parkinson's disease 8.
+
+Retinal diseases are often characterized by a variety of clinical signs that can be measured precisely using non-invasive, cost-effective retinal imaging techniques such as color fundus or optical coherence tomography (OCT). As such, retinal diseases are perfect candidates for deep phenotypic clinical characterisation. Age-related macular degeneration (AMD), a genetically and phenotypically complex common retinal disease, is known to progress to two clinically distinct subtypes that differ not only in retinal structural changes but also in prognosis for vision loss. These subtypes may have distinct molecular architectures 9–12. However, unlike AMD, for which divergent disease endpoints are clear, many other retinal diseases are assumed to follow a single progression pathway.
+
+In this study, we analyzed data from patients affected by macular telangiectasia type 2 (MacTel), a rare, genetically complex retinal disorder that exhibits marked heterogeneity in both structural retinal changes and functional deficits 13–17. Patients with MacTel differ in features such as vascular telangiectasia, retinal cavities, crystalline deposits, pigmentation, neovascularization, and vision loss rate 13. The magnitude of MacTel’s clinical variability is not fully understood 18, and the disease is currently thought to follow a linear progression pattern, which has been characterised into seven stages 14. We analyzed data from 7,888 eyes (3,971 patients) from the MacTel imaging biobank 19, capturing 87 clinically graded phenotypic variables. We adapt analytical techniques from single-cell RNA-sequencing (scRNA-seq), such as high-dimensional clustering and pseudotime trajectory inference, to the retinal clinical imaging data. These well-established computational tools from transcriptomics traditionally reconstruct cell differentiation pathways; here, we extend them to clinical phenomics. The approach leverages the large cross-sectional dataset, while a smaller longitudinal subset was used to validate the findings. We then integrated our findings with genetic data to investigate the genetic underpinnings of the disease’s clinical heterogeneity. 
+
+The novelty of our approach relies on the power of our framework to elegantly work on clinically graded features and, from these, infer differential disease progression routes using only cross-sectional data. Finally, by exploiting pseudoprogression estimation, our study is able to showcase a completely data-driven severity scale and non-linear rates of progression. 
+
+
+
+Methods
+
+Data Acquisition
+A schematic of the study and data cleaning is available in Figure 1. Data was obtained from two clinical studies. The longitudinal MacTel Natural History Observational Study (2005–2010) followed participants from 22 clinical centers across Australia, France, Germany, India, Israel, the United States, and the United Kingdom for up to five years. The cross-sectional MacTel Natural History Observational Registry (2010–Present) examined many of the same patients, plus newly enrolled cases, at a single study visit. Description and data collection procedures for both are available elsewhere 19. Both studies collected imaging data (color fundus, optical coherence tomography (OCT), fundus autofluorescence, fluorescence angiography); functional data (visual acuity), as well as demographics. Grading consisted of identifying MacTel-relevant macular abnormalities in nine zones divided according to the Early Treatment Diabetic Retinopathy Study (ETDRS) (Supplementary Methods). The datasets were harmonized into one dataset, with each record representing a patient’s eye at a particular visit.
+
+
+Macular Thickness Imputation 
+Three OCT machines were used to measure retinal thickness in each of the nine ETDRS zones, respectively, Cirrus and Stratus by Zeiss, and Spectralis by Heidelberg Engineering, for a total of 27 retinal thickness features. Retinal thickness measurements were taken for the macula only. Imputation of each machine’s missing values for all nine fields was performed using predictive mean matching with the Multiple-Imputation Chained Equations (MICE) method, with five iterations 20. A large proportion of eyes, hence, had retinal thickness measurements obtained by multiple machines. After intra-machine imputation, Spectralis had the most observations and was used as the reference distribution. Stratus and Cirrus measurements were rescaled accordingly, and an average across the three machines was computed to yield nine unified macular thickness measurements.
+
+Foveal Slope 
+The foveal slope degree was calculated as the arctangent of the thickness of the zone of interest, normalized to foveal thickness, divided by the disc diameter (500nm).
+
+Fixing Ordinality 
+Variables coding for phenotype presence followed a general pattern of ordinality: 0 = not present, 1 = questionable, and 2 = present. Some features did not follow a logical ordinality of increasing severity or presence; these were suitably reordered (Supplementary Table 1). 
+
+Addressing Retinal Feature Regression 
+Some features that had been observed in an eye’s previous visit failed to be seen in later visits. As this was deemed unlikely given the current literature on MacTel, we assumed that these features could not disappear once they were observed and that their disappearance might be due to the presence of other retinal features obscuring the reader’s ability to re-identify them. For ordinal features like those mentioned, each eye’s subsequent record was set to the maximum of previous visits. We ignored non-presence by not carrying it over when followed by a missing value, so as not to assume non-progression between visits.
+
+Visual Acuity Assessment Cleaning 
+LogMAR, Best-Corrected Visual Acuity (BCVA), and Snellen scores were calculated from patients’ 4-meter ETDRS eye chart scores. Missing LogMAR values were imputed by regressing LogMAR on acuity, and missing Snellen values by regressing Snellen on the base ten exponential of LogMAR. The missing functional feature values that remained were imputed using the multiple imputation chain equation (MICE) method.
+
+Feature and Sample Filtering 
+We excluded 23 features due to extreme skewness (> 30) or had greater than 20% missingness. Additionally, all perifoveal zone features were excluded, except for the outer superior zone, where several data abnormalities were observed. Additionally, a total of 343 observations were removed due to being outliers in terms of missingness (values > third quartile + 1.5*(interquartile range), corresponding to 28% missing data).
+
+Clustering Data Preparation and Imputation 
+Features were mean-centered and standardized. We identified five groups of features that presented missing values simultaneously via hierarchical clustering. To test for imputation performance, we sampled 10% of observations within each missingness group and then compared the imputation prediction of MICE to the original values. Pearson’s R and root mean square error (RMSE) of each observed-predicted comparison conveyed MICE’s ability to capture the relationships between the variables in the data. We removed six features for which imputation did not perform well (p-value > 0.05 and original missingness > 5%). The remaining data was then globally imputed by taking the average of 10 MICE predictive-mean-matching iterations. 
+
+Clustering
+We calculated 50 principal components (Supplementary Results) and used them in a two-step clustering pipeline to cluster our observations into distinct groups. Principal component analysis was used to overcome potential multicollinearity problems arising from the strong correlation observed in our clinical data. The first step utilized K-means to reduce the number of points to 10% of the data, which were then clustered using k-nearest neighbors with 10 neighbors.
+
+Cluster interpretation
+To visually interpret each cluster, clinical phenotype averages were calculated to summarize their phenotypic profile and visualized in a heatmap. We additionally characterized each cluster by training an XGBoost (xgboost R-package, 21) model to predict each observation’s cluster from the features. Using the Shapviz R-package 22, we calculated the SHAP scores for each feature, which were then summarized using a beeswarm plot.
+
+ 
+Trajectory Analysis
+Cluster principal components centroids were determined based on their means. On these centroids, a minimum spanning tree (MST) was calculated to connect the centroids. Pseudotime, in this study called pseudoprogression, was calculated for each point. The MST was then validated using observed transitions in the subset of eyes with longitudinal data (Supplementary Methods). Clustering robustness and trajectory were assessed by performing both on different subsets of the data and comparing their similarities (Supplementary Methods).
+
+Trajectory Classification
+Trajectory assignments were categorized into three groups on a subset of eyes based on their patterns (Figure 2). Following a decision schema (Supplementary Methods), a training dataset was created consisting of 533 manually labeled patient-eye sequences following two distinct trajectories found by looking at the MST results (Supplementary Methods). A linear discriminant analysis (LDA) classification model was then used to find the boundary between the trajectories. Input for the prediction models was the first two principal components, their interaction, and their squared values to allow for non-linearity. The training data was split into 70% training and 30% testing, and evaluated for predictive accuracy (Supplementary Methods). This model was then used to label the remaining eyes' PC features. In total, 4,047 eyes (2,543 patients, 51%) were classified into one of the two trajectory classes. These were eyes with more than one visit or observed in any of the trajectory-defining clusters (4, 6, 12, and 13 for the neurodegenerative route; 5, 8, 9, 10, and 11 for the vascular route). 
+
+Statistical Testing
+Multiple testing correction was performed using the Benjamini-Hochberg correction. The lmer function was used when testing all multi-level models. For cross-sectional models, we include a patient-level random intercept to account for both eyes. For longitudinal models, when an eye had more than one observation, we included a patient and eye-level random intercept. For all testing models, we corrected for sex and age, and for models regressing on genetic information, we included the first eight PCs taken from the original GWAS.
+
+Disease time estimation
+We binned observations by their baseline quantile to identify potential non-linearity in the 7-stage progression score and pseudoprogression over time from the left-censored longitudinal profiles. We used a Bayesian non-linear mixed-effects model to estimate each patient-eye's position along the population curve. From this, we derived the temporal shift aligning each individual profile with the latent logarithmic curve. 23.
+
+
+
+
+Results
+
+A schematic of the study is available in Figure 1. Following data cleaning (Methods), the dataset comprised 12,276 observations for 7,888 eyes belonging to 3,971 patients. Of these eyes, 492 had longitudinal data with an average follow-up of 4.8 years. A list of all clinical phenotypes measured is presented in Supplementary Table 2. Genotypic data for loci known to be associated with MacTel were also collected on 2,822 (71%) patients. For the genetic analyses, we used 16 loci associated with MacTel disease 15. Demographic characteristics are presented in Table 1. The data consisted of 34% males (N = 1,349) and 59% females (N = 2,344), with 7% unknown (N = 278). The median age of patients was 62 years. MacTel disease stage, as defined by the 7-stage progression score 14, was calculated using relevant features (Supplementary Methods). Among eyes at baseline, 56.2% of patients had a 7-stage progression score from 0 to 2, 31.6% from 3 to 4, and 12.2% from 5 to 6. 
+
+Number of observations
+12,276
+Number of patients
+3,971
+Number of eyes
+7,888
+Median eye age
+62
+Sex at birth
+
+Male
+1,349
+Female
+2,344
+Unknown
+278
+Type II Diabetes
+
+No
+4,039
+Yes
+2,050
+Unknown
+6,187
+7-stage eye severity
+
+0
+1,395
+1
+1,865
+2
+1,177
+3
+631
+4
+1,859
+5
+535
+6
+426
+
+Table 1: Description of study demographics and sample characteristics. 
+
+Variables were standardized to have a mean of 0 and a standard deviation of 1. Missing values were imputed using the average of the MICE imputations. A subset of complete cases was used to test MICE’s predictive ability by comparing actual values against those predicted by MICE. This resulted in a mean R = 0.25 concordance (Methods, Supplementary Figure 1). Parafoveal slope was obtained by estimating the angle from each of the four parafoveal zones' thickness to the foveal thickness (Methods). 
+
+Clinical phenotypes connections
+A feature-wise correlation analysis with hierarchical clustering was performed on the features (Supplementary Figure 2). The analysis revealed two groups of clinical signs co-occurring within the eyes of MacTel patients. One cluster connected foveal slope and thickness to visual acuity, while the other cluster included telangiectatic changes. 
+
+Clustering eyes into disease stages
+Clustering analysis using a two-step clustering method (Methods) indicated a best fit with 13 clusters. Principal component and t-SNE visualization of the data divided into such clusters is presented in Figure 2 A-B. The average z-score of all features in each cluster is presented in Supplementary Figure 3. Using an XGBoost model trained to predict clusters based on phenotypes, SHAP scores were also used to identify which clinical phenotypes best characterized each cluster (Supplementary Figure 4).
+
+From these two methods, we found that clusters' phenotypic profiles mark different MacTel stages. In particular, clusters 1, 2, and 3 mark the early stages of MacTel with no ellipsoid zone (EZ) loss in cluster 1, juxtafoveal EZ-loss in cluster 2, and centrally in cluster 3. Cluster 4 is characterized by worsened vision and increased pigmentation. Cluster 6 has low vision and a thinner parafovea, with this pattern continuing into clusters 13 and 12, both of which present with very thin parafoveas and low vision. Cluster 5 has greater parafoveal thickness and captures worse vision than cluster 4. Cluster 9 has an abundance of foveal detachment and thus increased parafoveal slope. Cluster 8 has increased vertical telangiectasial vessels, while cluster 10 has the highest prevalence of right-angle veins, blunted and dilated retinal vessels. Cluster 11 exhibits the most inner-capillary leakage. Lastly, cluster 7 exemplified the most outer-nuclear-layer loss but was deemed an artifact as it was almost entirely comprised of observations taken from a single location (Supplementary Figure 5). This cluster was not considered in follow-up analyses. Sample retinal images for each cluster are presented in Supplementary Figure 6.
+
+Construction of a new, unsupervised, continuous progression score
+The existing 7-stage clinical severity score, which uses only a handful of clinical phenotypes, was significantly different (p<2.2-16) between clusters in both G and ꭓ tests of independence (Supplementary Figure 7), demonstrating that our new, data-driven clustering approach divided eyes by latent severity. We, however, found that clinically distinct clusters presented the same 7-stage clinical severity score. We hence theorized that a more granular progression scale could be obtained by using all phenotypic information collected in our dataset. We performed pseudotime analysis, commonly used in gene expression analysis, on our mosly cross sectional dataset. We employ this method on a minimum spanning tree calculated from 50 PCs to derive a continuous score of progression, which we refer to as pseudoprogression (Figure 2 C-D), providing a measure of severity using a non-linear combination of all phenotypes. PC1 demonstrated strong partitioning of eyes across pseudoprogression scores. Clusters 1 and 2 exhibit the lowest pseudoprogression, while clusters 3 and 4 have medium pseudoprogression scores. Clusters 7 to 13 show the highest pseudoprogression (Supplementary Figure 8). We found a strong correlation between the 7-stage progression score and pseudoprogression (R = 0.62, p-value < 0.0001) (Supplementary Figure 9), suggesting the pseudoprogression score has captured relevant clinical data, as well as identifying additional signals missed by the 7-stage progression score. 
+
+Disease trajectory analysis
+Similarly to scRNA-seq data analysis, we used minimum spanning trees to infer separate trajectories of disease progression and potential differentiation. Our analyses revealed eyes separating for global severity on PC1 with a bifurcation of progression into two distinct routes, the directionality of which correlated strongly with PC2 (Figures 1A and C). 
+
+We used the smaller longitudinal data set to validate our trajectory analyses gained from the global dataset (Supplementary Table 3, Supplementary Figure 10). For example, 51% of eyes that move out of cluster 1 transition to cluster 2. From the other direction, of eyes that enter 2, 74% come from cluster 1. Of eyes leaving cluster 2, 49% go to cluster 3, and 50% that enter cluster 3 come from cluster 2. From the split at cluster 3, 37% go to cluster 5, while 30% of those entering cluster 5 come from cluster 3. Of eyes that move from cluster 3, 25% go to cluster 4, while 34% entering cluster 4 come from cluster 3. We compared the observed transition matrix’s alignment against several theoretical transition structures using a likelihood ratio test and found that observed cluster transitions align best with the bifurcated structure (Supplementary Figure 11) (Methods). To test the stability of our trajectory analysis, we ran the analysis on four datasets: three with 40, 60, and 80 percent of the original data, respectively, and one with added Gaussian noise (N(0, 0.5)) (Supplementary Figure 12). We were able to identify the global bifurcation structure in all four. The same structure was also obtained when we stratified the data by continent of origin (Supplementary Figure 13). To test clustering stability, we overlaid 48 solutions to a set of permuted clustering parameters, which also recapitulated the original bifurcation (Supplementary Figure 14). 
+
+Linear discriminant analysis was used to label observations aligning with one of three trajectories, namely, “vascular” (A), “neurodegenerative” (B), or “unknown” (X) (Methods). (Methods). A total of 1,374 eyes were classified as vascular, 1,896 as neurodegenerative, and 777 as unknown (Supplementary Figure 15). 
+
+We found significant agreement between fellow right and left eyes (χ2 = 334; p-value = 1.65e-74) (Supplementary Table 4). This strong agreement suggested a potential genetic involvement in the differentiation of disease progression trajectory. To this end, we examined the association between trajectory (vascular or neurodegenerative) and 16 SNPs previously associated with MacTel risk (Supplementary Table 5). We found that the G allele of SNP rs17421627, located near the lncRNA MIR9-2, is significantly associated with the vascular trajectory (q-value = 5.811e-4; log-odds = -1.195), while the G allele of SNP rs146953046 (PHGDH), T allele of rs10995566 (REEP3), and A allele of rs6955423 (PSPH) are all significantly associated with the neurodegenerative trajectory.
+
+To determine if early clinical phenotypes can be used to predict future trajectory differentiation, we tested how phenotypes at early stages (7-stage progression score of 2 or less) correlate to the vascular or neurodegenerative trajectory (Methods) (Supplementary Table 6). We find that superior-inner right-angle veins may be prognostic of eye progression into a neurodegenerative trajectory (q-value = 4.20e-06). Eyes with superior-inner blunted retinal vessels or temporal-inner RPE leakage may predispose patient-eyes to the vascular trajectory (q-value = 4.266e-02 and 1.02e-05, respectively). 
+
+A covariate-only model, including sex, age, and type II diabetes, revealed a significantly positive association between the neurodegenerative trajectory with age (log-odds = 0.597, p-value = 2.034e-17) and type II diabetes (log-odds = 0.377, p-value = 3.436e-03) (Supplementary Table 7).
+
+Genotype-Phenotype Association
+To understand whether the identified genetic components contribute to the risk of specific clinical phenotypes, we tested each phenotype for association with all 16 SNPs (Methods) (Supplementary Table 8). The SNP rs17421627, located near lnc-gene MIR9-2, showed a strong positive association with central and parafoveal retinal thickness (q-value = 2.59E-04 to 2.54E-03). Another variant, rs17279437, near the gene SLC6A20, exhibited a negative relationship with superior-inner, nasal-inner, and inferior-inner macular thickness (q-value = 1.31E-02 to 4.63E-02). The variant rs1260326 near GCKR was associated with multiple phenotypes, including decreased autofluorescence at vessel ends (q-value = 1.91E-02), intra-retinal pigment migration (q-value = 2.53E-02), and both inner inferior and temporal irregular RPE (q-value = 4.55E-02, 4.55E-02). Additionally, rs146953046, near a rare variant of PHGDH, was positively associated with temporal-inner irregular RPE (q-value = 3.26E-02), and rs2160387 near SLC1A4 was associated with inferior-inner RPE leakage (q-value = 4.55E-02).
+
+Hierarchical clustering of SNP-phenotype effect sizes revealed two main clusters with MIR9-2 as an outgroup (Figure 3). The first cluster contains the rarer variant of PHGDH, PSPH, SLC1A4, CPS1, and GCKR, which all play a role in serine/glycine metabolism 24,25. CPS1 has also been shown to play a role in plasma glycine levels. GCKR is associated with both type II diabetes and metabolic syndrome 26. The second group contains TTC39B, JMJD6, EOMES, PPP2R5A, JMJD1C, PAX6, FBN3, TRIB1, SLC6A20. 
+
+Rate of progression exploration
+To investigate the relationship of pseudoprogression with chronological time, we used the available longitudinal data and binned each eye into five quintiles based on its baseline pseudoprogression value. We observed a non-linear relationship where the pseudoprogression rate decreases over time (Supplementary Figure 16A). A similar pattern was observed using the 7-stage severity scale (Supplementary Figure 16B). Using a Bayesian non-linear mixed-effects model, we estimated the position of each patient eye along the population curve, and from these, we estimated the time between the 7-stage progression score and clusters (Supplementary Figures 17A-B). 
+
+To identify potential prognostic factors that influence the progression rate, we modeled the change in pseudoprogression and 7-stage progression score over time against all baseline clinical phenotypes. As progression rates differ at different stages of progression, and distinct clinical phenotypes define such stages, we limited our model to patients with a baseline 7-stage severity scale of 2 or less. When compared to the average rate of pseudoprogression change, visual acuity was prognostic of an increased rate of progression (Supplementary Table 9) while central EZ-loss was prognostic of a reduced 7-stage progression rate (Supplementary Table 10). 
+Genetic testing with progression rate revealed a nominal negative association of SNP rs6955423 in PSPH with faster progression (p = 0.042) (Supplementary Table 11). 
+
+Lastly, we calculate the expected time interval between the 7-stage severity scale and between clusters (Methods) and found that it might take more than 20 years to reach the latest stages of disease (Supplementary Figure 17 C-D). 
+
+
+
+
+
+Discussion
+
+Our study showcases a novel clinical phenomics analysis framework that repurposes techniques from scRNA-seq to identify clinically distinct progression routes in MacTel and highlight their genetic risk factors. Specifically, we show that MacTel-affected eyes can be allocated into 12 clinically distinct progression groups. These groups fall into two routes that bifurcate mid-progression course: one leading to a more vascularly altered retina with partially preserved central vision, and the other to a neurodegenerative manifestation culminating in central vision impairment. By integrating MacTel genetic risk factors, we show that clinical heterogeneity and differential progression are shaped by distinct genetic architectures. Notably, these genetic predictors reflect different molecular aetiologies, further corroborating our findings.. We also constructed a new continuous progression score and showed that MacTel progression is non-linear - faster initially and gradually plateauing in later stages. Together, our study advances clinical understanding of MacTel and serves as a prototype for integrative phenomics investigations in other retinal diseases, enabling more focused precision medicine approaches. This approach should lead to more principled, data-driven approaches for the identification of novel diagnostic and prognostic imaging biomarkers.
+
+Our approach is based on drawing an analogy between cellular development and the clinical manifestation of disease. As cells mature, their molecular behaviour - measured via gene transcription - changes. Similarly, as a disease progresses, affected tissues exhibit signs of increasing clinical impact and extent. Such changes can be measured exquisitely in retinal diseases using non-invasive, cost-effective ophthalmic imaging. Our approach is particularly attractive in this setting, as it interrogates clinical data in a fully data-driven manner, revealing new findings while confirming established ones. Notably, most retinal studies rely on preselected structural changes to define staging and progression, whereas our approach makes use of all available data, including spatial and functional data. Related unbiased frameworks have already yielded robust, clinically relevant discoveries 6–8,27–31. 
+
+We identified twelve clinically relevant MacTel clusters. These delineate subgroups of MacTel-affected eyes. We observed that some of these clusters, although clinically distinct in our analyses, were assigned the same severity level using the current MacTel severity scale, highlighting the need for further clinical refinement of severity groups in MacTel research. Lastly, we observed that the identified clusters map to different chronological points along the natural progression of the disease.
+
+Using pseudotime calculations, we derived a clinically robust continuous pseudoprogression score that provides a more granular scale of disease severity by incorporating a broader diversity of clinical signs. A continuous progression score for MacTel has previously been proposed, where a machine-learning model was trained to predict the 7-stage severity scale using OCT imaging alone 32. Our score, however, expands on prior work in several ways. The 7-stage severity scale was designed to specifically predict BCVA impairment from multimodal structural imaging, and the linear score from the machine-learning model was trained to predict that 7-stage severity scale 14. As such, both approaches are effectively optimised to predict loss of visual acuity. BCVA captures patient-perceived vision loss but overlooks structural changes and peripheral deficits that patients may not notice. Nevertheless, it remains effective at separating eyes into different progression states 33–35. Moreover, both prior scores were trained to predict an outcome, or with a supervised approach, whereas our (unsupervised) method constructs an outcome-agnostic score that orders eyes along a continuous gradient of clinical severity.
+
+Little is known about the rate of progression in MacTel. Previous studies analysing longitudinal EZ loss have suggested a non-linear disease course 36,37. Using our continuous score together with longitudinal data, we show that MacTel progresses rapidly in the early stages but exhibits a steady reduction in the rate of progression over time, with a plateau reached towards the end stages. This behaviour is not unexpected, as previous research has shown the later stages of the disease to be more stable 18.
+
+The MST approach used to calculate pseudoprogression revealed a bifurcated MacTel progression pattern, diverging into two distinct routes. One route is characterised by a high prevalence of alterations of the retinal vasculature. Eyes in the terminal clusters of this route maintain substantially better central vision, as measured by BCVA. In contrast, the other route is characterised by neurodegeneration, associated with a loss of central vision. Using the smaller longitudinal subset, we confirmed that the bifurcated progression model fit the observed inter-cluster transitions better than a linear architecture. It is important in this setting to distinguish between retinal vascular alterations and neo-vascularization. In MacTel disease, the former is an early sign used to diagnose the disease, while the latter is typically a end-stage phenotype. In our study, although rare and not well classified, neo-vascularization was observed in the late-stage clusters of the neurodegenerative route, suggesting neovascularization be connected to the severe retinal degeneration.   
+
+Among the eleven reported MacTel risk SNPs, we found that SNP rs17421627 in MIR9-2 was associated with the vascular route. This is particularly intriguing. This SNP has previously been linked to spatially increased retinal thickness 38 across multiple layers 39 and to larger retinal vasculature calibers 40. Additionally, the same SNP is associated with increased risk of AMD 41, glaucoma 42, and premature retinal aging 43. The role of this genomic locus in retinal health remains unclear; however, targeted studies have implicated it in regulating the expression of MIR9-2 in Müller glial cells as a result of differences in retinal development 44. Reduced expression of MIR9-2 causes altered Müller glial homeostasis in human retinal tissue 44 and retinal vascular defects in zebrafish models 45. Conversely, SNPs rs146953046 and rs6955423 were associated with increased risk of progression towards the neurodegenerative route. Both SNPs have been associated with reduced circulating serine 24,25,46This is a MacTel risk factor which deficiency of which leads to accumulation of neurotoxic deoxysphingolipids in the retina in animal models 16,47.      
+
+We also found that older patients and those with type 2 diabetes, a known metabolic MacTel comorbidity 19, were more likely to be classified within the neurodegenerative route. Notably, patients with type 2 diabetes exhibit metabolic dysregulation overlapping with MacTel, including elevated circulating deoxysphingolipids, lower sphingomyelins, and reduced glycine 48–52. 
+
+Lastly, we identified several SNP-phenotype associations. Some associations were expected, such as rs17421627 with retinal thickness. Others were more intriguing: rs1260326 and rs17279437 were associated with pigment migration and retinal thinning, respectively, and both reside in genes (GCKR, SLC6A20) linked to type 2 diabetes - a known MacTel comorbidity. We did not find any significant association between MacTel risk loci and MacTel progression. This result is in line with a recent large study highlighting the likelihood that genetic loci involved in disease progression rate are particularly hard to identify and likely differ from those of disease risk 53.
+
+To the best of our knowledge, our study is the first of its kind in both framework and specific findings on MacTel disease. We used a large, data-rich MacTel biobank, comprising data from more than 7,000 eyes, which has been previously leveraged for multiple studies19. Longitudinal observations in a much smaller subset allowed validation of our results and enabled estimation of longitudinal progression rates and transition times. Our study showcases a robust approach for phenotypic subtyping and clustering beyond simple severity scales or binary feature-based divisions, moving past descriptive classifications to reveal differential progression pathways. While pseudotime and trajectory analysis approaches have been used in these clinical data applications 6–8,27–31, no prior framework has chained the full scRNA-seq analytical paradigm to infer bifurcated progression trajectories from predominantly cross-sectional clinical imaging grading data. Additionally, no other study has linked such an inferred trajectory to the disease genetic architecture.
+
+Although it would be unwise to suggest integrating our genetic associations for clinical practice, by elucidating the genetic and biological mechanisms behind progression differentiation, future studies might explore more direct avenues for disease progression prediction. 
+
+Our study has limitations. Firstly, we corrected any sign of disease regression in our dataset since it was deemed clinically unlikely, making our results non-representative of potentially rare healing groups. Our cohort might suffer from selection bias as patients were collected at specific locations throughout Europe, the United States, and Australia, making our study not representative of the wider global MacTel population. This is the only MacTel dataset that exists at this level of clinical resolution, rendering true independent validation impossible. Publicly available eye-imaging biobanks (e.g., UK Biobank) lack both MacTel diagnoses and the specific imaging required for our grading, such as fundus fluorescein angiography or fundus autofluorescence imaging. We mitigated this by performing multiple robustness analyses on the available data. Another constraint is the limited available longitudinal data. Our clusters show some overlap; therefore, individual eye classifications should be regarded as exploratory. They are not intended for direct clinical implementation.. Additionally, our longitudinal data includes eyes that transitioned between nonadjacent and non-connected clusters. Accordingly, our results should be viewed as a guide for further research for clinical application rather than a diagnostic ruleset. Lastly, controlling for more external factors, such as diabetes management or severity, as well as behavioural and environmental factors, could improve our understanding of disease variability and progression. As these were not available in our study, further research is warranted to explore these aspects. 
+
+Our work serves as a foundational framework for the analysis of disease progression from cross-sectional data. Disease progression analysis has been identified as a key challenge for complex diseases 53, currently prevented due to the lack of available, and costly, longitudinal datasets. This approach is generalizable to other disorders where large, cross-sectional, detailed clinical information is available. Future work might apply this framework to diseases with established differential progression routes, such as AMD, to extend and refine existing subtype definitions.. Further studies are needed to translate our results into clinical practice for both prognosis and disease management. Recently, a therapeutic intervention using encapsulated cell therapy to release CNTF directly into the eye of MacTel patients has been approved 54. Future research might assess the efficacy of such treatments across both progression routes. Pathobiological research is also needed; additional ‘omics and molecular studies could uncover the molecular drivers of this disease and its progression stratification.
+
+Acknowledgements
+We thank the volunteers who participated in this study. We thank all the clinical graders who diligently collected the phenotypic data from patients' images. A list of contributing clinical sites is available in Supplementary Table 12. We are grateful to Marin Gantner and Kevin Eade for their helpful discussion. Support for this study came from the Lowy Medical Research Institute.
+
+Funding
+M.B. is supported by an Investigator grant from the National Health and Medical Research Council (APP1195236). This work was also supported by the Victorian 5
+Government’s Operational Infrastructure Support Program and the National Health and Medical Research Council Independent Research Institute Infrastructure Support Scheme (IRIISS).
+
+Author contributions
+C.A. performed the data analyses and wrote the manuscript. R.B. conceived and supervised the study and wrote the manuscript. S.T. provided clinical understanding of the findings. L.Sco. and M.B. cleaned and provided the genetic data, I.L., F.S., C.E., and T.P. clinically graded the images. L.Sch. and M.F. provided access to the phenotypic data and facilitated the study. All authors contributed to the writing and final approval of the manuscript.
+
+Competing interests
+The authors declare no competing interests.
+
+Ethics approval and consent to participate. 
+The study complied with the ICH E6 Good Clinical Practice guidelines and applicable U.S. regulatory requirements, including 45 CFR 46 and 21 CFR Part 56. The study protocol was approved by Sterling, a central Institutional Review Board (IRB), and by site-specific institutional review boards, as applicable. Written informed consent was obtained from all participants prior to enrollment. The Emmes Corporation (Rockville, MD, USA) served as the coordinating center for the study.
+
+
+Data availability
+Summary statistics not provided in this manuscript are available upon request. The main analysis scripts are available on GitHub at XXX.
+
+Use of AI
+Artificial intelligence was used to improve the clarity of sentences across the manuscript. The content of the manuscript adheres strictly to the original writing of the authors and has been extensively checked.
+
+
+Figures:
+
+
+
+
+Figure 1: Study analyses pipelines and questions. In this figure, each method is boxed and connected. Groups of methods are also framed by dashed boxes. A different set of questions is then investigated from the resulting data.
+
+
+Figure 2: PCA plot (A, C) and TSNE plots (B, D) for all observed eye visits in the study. MST plots are also presented alongside cluster nodes. Colors or the points represent clustering results (A, B) or pseudoprogression scores (C, D).
+
+
+
+
+
+Figure 3: Heatmap of regression results of genetic impact on phenotype. Each row represents a phenotype. Each column is a SNP. Entries represent the effect size of each SNP on each phenotype. A star system is used to represent significance (* p-value <0.05, ** q-value < 0.05, *** q-value < 0.01). 
+
+
+
+References
+
+1.	Lambin, P. et al. Radiomics: the bridge between medical imaging and personalized medicine. Nat. Rev. Clin. Oncol. 14, 749–762 (2017).
+2.	Topol, E. J. Individualized medicine from prewomb to tomb. Cell 157, 241–253 (2014).
+3.	Ashley, E. A. Towards precision medicine. Nat. Rev. Genet. 17, 507–522 (2016).
+4.	Lan, L. et al. Phenomic imaging. Phenomics 3, 597–612 (2023).
+5.	Ahlqvist, E. et al. Novel subgroups of adult-onset diabetes and their association with outcomes: a data-driven cluster analysis of six variables. Lancet Diabetes Endocrinol 6, 361–369 (2018).
+6.	Ahmad, T. et al. Clinical implications of chronic heart failure phenotypes defined by cluster analysis. J. Am. Coll. Cardiol. 64, 1765–1774 (2014).
+7.	Uijl, A. et al. Identification of distinct phenotypic clusters in heart failure with preserved ejection fraction. Eur. J. Heart Fail. 23, 973–982 (2021).
+8.	Hähnel, T. et al. Progression subtypes in Parkinson’s disease identified by a data-driven multi cohort analysis. NPJ Parkinsons Dis. 10, 95 (2024).
+9.	Schwartz, R. et al. Genetic distinctions between reticular pseudodrusen and drusen: A genome-wide association study. Am. J. Ophthalmol. 0, (2025).
+10.	Fritsche, L. G. et al. Seven new loci associated with age-related macular degeneration. Nat. Genet. 45, 433–9, 439e1–2 (2013).
+11.	Mendez, K. et al. Metabolomic-derived endotypes of age-related macular degeneration (AMD): a step towards identification of disease subgroups. Sci. Rep. 14, 12145 (2024).
+12.	Yan, Q. et al. Genome-wide analysis of disease progression in age-related macular degeneration. Hum. Mol. Genet. 27, 929–940 (2018).
+13.	Charbel Issa, P. et al. Macular telangiectasia type 2. Prog. Retin. Eye Res. 34, 49–77 (2013/5).
+14.	Chew, E. Y. et al. Macular Telangiectasia Type 2: A Classification System Using MultiModal Imaging MacTel Project Report Number 10. Ophthalmol Sci 3, 100261 (2023).
+15.	Bonelli, R. et al. Identification of genetic factors influencing metabolic dysregulation and retinal support for MacTel, a retinal disorder. Commun Biol 4, 274 (2021).
+16.	Gantner, M. L. et al. Serine and Lipid Metabolism in Macular Disease and Peripheral Neuropathy. N. Engl. J. Med. (2019) doi:10.1056/NEJMoa1815111.
+17.	Eade, K. et al. Serine biosynthesis defect due to haploinsufficiency of PHGDH causes retinal disease. Nat Metab 3, 366–377 (2021).
+18.	Heeren, T. F. C. et al. Macular Telangiectasia Type 2: Visual Acuity, Disease End Stage, and the MacTel Area: MacTel Project Report Number 8. Ophthalmology 127, 1539–1548 (2020).
+19.	Clemons, T. E. et al. Baseline characteristics of participants in the natural history study of macular telangiectasia (MacTel) MacTel Project Report No. 2. Ophthalmic Epidemiol. 17, 66–73 (2010).
+20.	van Buuren, S. & Groothuis-Oudshoorn, K. mice : Multivariate Imputation by Chained Equations in R. J. Stat. Soft. 45, 1–67 (2011).
+21.	Chen, T. & Guestrin, C. XGBoost: A Scalable Tree Boosting System. in Proceedings of the 22nd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining (ACM, New York, NY, USA, 2016). doi:10.1145/2939672.2939785.
+22.	Lundberg, S. M. & Lee, S.-I. A Unified Approach to Interpreting Model Predictions. Advances in Neural Information Processing Systems 30, (2017).
+23.	Shen, L. L., Del Priore, L. V. & Warren, J. L. A hierarchical Bayesian entry time realignment method to study the long-term natural history of diseases. Sci. Rep. 12, 4869 (2022).
+24.	Lotta, L. A. et al. A cross-platform approach identifies genetic regulators of human metabolism and health. Nat. Genet. 53, 54–64 (2021).
+25.	Karjalainen, M. K. et al. Genome-wide characterization of circulating metabolic biomarkers. Nature 628, 130–138 (2024).
+26.	Diabetes Genetics Initiative of Broad Institute of Harvard and MIT, Lund University, and Novartis Institutes of BioMedical Research et al. Genome-wide association analysis identifies loci for type 2 diabetes and triglyceride levels. Science 316, 1331–1336 (2007).
+27.	Murray, E. M. et al. Machine learning to define phenotypes and outcomes of patients hospitalized for heart failure with preserved ejection fraction: Findings from ASCEND-HF. Am. Heart J. 254, 112–121 (2022).
+28.	Mukherjee, S. et al. Molecular estimation of neurodegeneration pseudotime in older brains. Nat. Commun. 11, 5781 (2020).
+29.	Lee, H. et al. Prognostic significance of pseudotime from texture parameters of FDG PET/CT in locally advanced non-small-cell lung cancer with Tri-modality therapy. Cancers (Basel) 14, 3809 (2022).
+30.	Dervić, E. et al. Unraveling cradle-to-grave disease trajectories from multilayer comorbidity networks. NPJ Digit. Med. 7, 56 (2024).
+31.	Frishberg, A. et al. Reconstructing disease dynamics for mechanistic insights and clinical benefit. Nat. Commun. 14, 6840 (2023).
+32.	Wu, Y. et al. Developing a continuous severity scale for macular telangiectasia type 2 using deep learning and implications for disease grading. Ophthalmology 131, 219–226 (2024).
+33.	Sallo, F. B. et al. Correlation of structural and functional outcome measures in a phase one trial of CNTF in type 2 idiopathic macular telangiectasia. Retina (2017) doi:10.1097/IAE.0000000000001706.
+34.	Heeren, T. F. C. et al. Dark-Adapted Two-Color Fundus-Controlled Perimetry in Macular Telangiectasia Type 2. Invest. Ophthalmol. Vis. Sci. 60, 1760–1767 (2019).
+35.	Müller, S. et al. Contrast sensitivity and visual acuity under low light conditions in macular telangiectasia type 2. Br. J. Ophthalmol. 103, 398–403 (2019).
+36.	Pauleikhoff, D. et al. Progression characteristics of ellipsoid zone loss in macular telangiectasia type 2. Acta Ophthalmol. 38, S20 (2019).
+37.	Raming, K. et al. Long-term progression of ellipsoid zone loss and associated features on optical coherence tomography in Macular Telangiectasia Type 2. Ophthalmology (2025) doi:10.1016/j.ophtha.2025.11.008.
+38.	Jackson, V. E. et al. Multi-omic spatial effects on high-resolution AI-derived retinal thickness. Nat. Commun. 16, 1–19 (2025).
+39.	Zekavat, S. M. et al. Phenome- and genome-wide analyses of retinal optical coherence tomography images identify links between ocular and systemic health. Sci. Transl. Med. 16, eadg4517 (2024).
+40.	Ikram, M. K. et al. Four novel Loci (19q13, 6q24, 12q24, and 5q14) influence the microcirculation in vivo. PLoS Genet. 6, e1001184 (2010).
+41.	Yao, X. et al. Genome-wide analysis of genetic pleiotropy and causal genes across three age-related ocular disorders. Hum. Genet. 142, 507–522 (2023).
+42.	Han, X. et al. Large-scale multitrait genome-wide association analyses identify hundreds of glaucoma risk loci. Nat. Genet. 55, 1116–1125 (2023).
+43.	Ahadi, S. et al. Longitudinal fundus imaging and its genome-wide association analysis provide evidence for a human retinal aging clock. Elife 12, (2023).
+44.	Thomas, E. D. et al. Cell-specific cis-regulatory elements and mechanisms of non-coding genetic disease in human retina and retinal organoids. Dev. Cell 57, 820–836.e6 (2022).
+45.	Madelaine, R. et al. A screen for deeply conserved non-coding GWAS SNPs uncovers a MIR-9-2 functional mutation associated to retinal vasculature defects in human. Nucleic Acids Res. (2018) doi:10.1093/nar/gky166.
+46.	Yin, X. et al. Genome-wide association studies of metabolites in Finnish men identify disease-relevant loci. Nat. Commun. 13, 1644 (2022).
+47.	Lim, E. W. et al. Serine and glycine physiology reversibly modulate retinal and peripheral nerve function. Cell Metab. 0, (2024).
+48.	Yousri, N. A. et al. Metabolic and Metabo-Clinical Signatures of Type 2 Diabetes, Obesity, Retinopathy, and Dyslipidemia. Diabetes 71, 184–205 (2022).
+49.	Zaghlool, S. B. et al. Metabolic and proteomic signatures of type 2 diabetes subtypes in an Arab population. Nat. Commun. 13, 7121 (2022).
+50.	Meikle, P. J. & Summers, S. A. Sphingolipids and phospholipids in insulin resistance and related metabolic disorders. Nat. Rev. Endocrinol. 13, 79–91 (2017).
+51.	Morze, J. et al. Metabolomics and Type 2 Diabetes Risk: An Updated Systematic Review and Meta-analysis of Prospective Cohort Studies. Diabetes Care 45, 1013–1024 (2022).
+52.	Wittenbecher, C. et al. Changes in metabolomics profiles over ten years and subsequent risk of developing type 2 diabetes: Results from the Nurses’ Health Study. EBioMedicine 75, 103799 (2022).
+53.	Yang, Z. et al. Limited overlap between genetic effects on disease susceptibility and disease survival. Nat. Genet. 57, 2418–2426 (2025).
+54.	Chew, E. Y. et al. Cell-based ciliary neurotrophic factor therapy for macular telangiectasia type 2. NEJM Evid. 4, EVIDoa2400481 (2025).
+

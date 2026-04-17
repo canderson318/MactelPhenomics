@@ -1,0 +1,1242 @@
+---
+title: "09_clustering"
+author: "Christian Anderson"
+date: "`r Sys.Date()`"
+output: html_document
+---
+# options
+```{r}
+# dev.off()  # Turn off the current graphics device
+# options(device = "RStudioGD")
+# quartz()
+
+
+
+```
+
+# Packages
+```{r, message=FALSE, warning=FALSE, results='hide', echo = TRUE}
+
+pacman::p_load(tidyr,dplyr,reshape2,purrr,GGally,tidyverse,ggpubr,vcd,ggplot2,tidytext,gridExtra,ComplexHeatmap,zoo,mgcv,car,zoo,tools,mice,grDevices,ggrepel,grid,gplots,Metrics,stats,lme4,lmerTest,dendextend,magick,umap,scater,SingleCellExperiment,scran,bluster,slingshot,ggfortify,pheatmap,TSCAN,igraph,knitr, HDF5Array, parallel, openxlsx, qs)
+
+
+
+rm(list = ls())
+gc()
+```
+
+# functions
+```{r}
+
+source("/Users/canderson/Documents/LMRI/PRJ2024001/version015/analysis/00_MyFunctions.R")
+
+```
+
+
+# Load Data
+
+```{r, message=FALSE, warning=FALSE, results='hide', echo = TRUE}
+
+wd_path = "~/Documents/LMRI/PRJ2024001/version015/"
+
+# raw list of dfs
+# list.files(sprintf("%sprocessed_data/",wd_path)) %>% 
+#   grep("dfs_list",.,value = TRUE)
+raw <- readRDS(paste0(wd_path, "processed_data/dfs_list_01.rds"))
+
+# joined cleaned joined data
+data_name <- "CF_FFA_DEM_DIAGNOSIS_ENRNHOR_ENRNHOS_FAFGRADE_FAMSTATUS_MH_OCTMAIN_OCTMTCIRRUS_OCTMTSPECTRALIS_OCTMTSTRATUS_VAA_lea_07.rds"
+d_raw <- readRDS(paste0(wd_path, "processed_data/", data_name))# clean data with everything 
+d <- d_raw
+
+# grading nomenclature and information
+info_path <- paste0(wd_path, "processed_data/database_grading_key_04.xlsx")
+info <-  read.xlsx(info_path)
+
+```
+
+## load Robbie's and Yue's factors
+```{r}
+
+
+# Robbies linear factors
+factor_root = dirname(wd_path)
+paths = c(
+    sprintf("%s/raw_data/Linear_Factors/data_cleaned_sce_Microsoft_factorised.RData", factor_root),
+    sprintf("%s/raw_data/Linear_Factors/data_cleaned_sce_Yue_factorised.RData", factor_root)
+)
+
+load(paths[[1]], verbose = TRUE)
+microsoft_sce <- sce
+sce <- NULL
+microsoft_coldata <- colData(microsoft_sce) %>% 
+  as.data.frame() %>% 
+  select(patID = universal_patient_id, eye, chew_grade =Chew_grading, MacTel)
+
+# "universal_scan_id"  "sampleID"           "MacTel_python"       "universal_patient_id" "universal_patient_id_old"
+# "patientId"          "s3originpath"       "studydate"           "studytype"            "seriestype"
+# "eye"                "modality"           "seriesclean"         "dicomIdentifier"      "name"
+# "Patient.ID.yue"     "dicom_file_name"    "MacTel.Diagnosis"    "Patient.s.SEXF"        "Data.Shape"
+# "Pixel.Spacing"      "data.dim"           "dataset_name"        "instance_path"        "patient_no"
+# "ptid_json"          "patient_id"         "instance_json"       "instance_id"          "image.counts"
+# "Chew_grading"       "MacTel"
+
+
+load(paths[2])
+yue_sce <- sce
+sce <- NULL
+yue_coldata <- colData(yue_sce) %>% 
+  as.data.frame() %>% 
+  select(patID = macID, NHOR, eye, chew_grade = emily_grade) %>% 
+  mutate(visitID = sapply(strsplit(NHOR, "_"), `[`, 2)
+         ) %>% 
+  select( -NHOR)
+# "site.ID" "macID""visitType.Code""visitTypeText""date.of.scan" NHOR""eye" "colourID" "visitID" "photoDate" "gradingDate" "graderID" "emily_grade""MacTel_visit_ID" "sampleID"
+
+both <- full_join(microsoft_coldata, yue_coldata) %>% 
+  mutate(eye = case_match(eye, 
+    "R" ~ 1, 
+    "L" ~ 2
+  )) %>% 
+  mutate(patID_eye = paste(patID, eye, sep = "_"))
+
+both %>% 
+  group_by(patID_eye, visitID) %>% 
+  reframe(n_distinct_chew = n_distinct(chew_grade)) %>% 
+  pull(n_distinct_chew) %>% 
+  table()
+# ^ no duplicates
+
+both_sub <- both %>% 
+  select(patID_eye, visitID, chew_grade) %>%
+  na.omit() %>% 
+  unique()
+
+# join this to main d
+d <- 
+  d %>% 
+  left_join( both_sub, 
+             by = c("patID_eye", "visitID"), 
+             relationship = "one-to-one") 
+
+
+```
+
+
+# make new directorys for plots
+```{r}
+
+a_path <- paste0(wd_path, "results/clustering/09_clustering")
+if(!dir.exists(a_path)) {
+  dir.create(a_path, recursive = TRUE)
+  
+}
+
+
+```
+
+# clean data
+
+
+```{r, look at dims}
+check_dims <- function(D = d){
+  
+  cat(paste0("\ndims : ", paste(dim(D), collapse = " "),"\n"))
+  
+  n_patIDs <- D %>% 
+    select(patID, visitID, eye_num) %>% 
+    drop_na() %>% 
+    pull(patID ) %>% 
+    n_distinct(na.rm = TRUE)
+  
+  n_patID_eyes <- D %>% 
+    select(patID, visitID, eye_num) %>% 
+    drop_na() %>% 
+    select(patID, eye_num) %>% 
+    n_distinct(na.rm = TRUE)
+  
+  n_observations <- D %>% 
+    select(patID, visitID, eye_num) %>% 
+    drop_na() %>% 
+    n_distinct(na.rm = TRUE)
+  
+  n_patIDs_w_gr_1_vis <- D %>% 
+    select(patID, visitID, eye_num) %>% 
+    drop_na() %>% 
+    filter(n()>1, .by = c(patID, eye_num)) %>% 
+    pull(patID) %>% 
+    n_distinct(na.rm = TRUE)
+  
+  print(rbind(n_patIDs,n_patID_eyes,n_observations,n_patIDs_w_gr_1_vis))
+  
+}
+
+check_dims()
+# dims : 12600 290
+#                      [,1]
+# n_patIDs             3693
+# n_patID_eyes         7386
+# n_observations      12600
+# n_patIDs_w_gr_1_vis   516
+# ^ added chew grade
+
+### MARCH 17 2025 ###
+# dims : 12619 313
+# n_patIDs             4034
+# n_patID_eyes         8063
+# n_observations      12617
+# n_patIDs_w_gr_1_vis   500
+
+```
+
+## round month, make sample column
+```{r}
+# round month 
+d$month <- round(d$month, 2)
+
+# make sample
+d <- d %>% 
+    mutate(sample = paste(patID_eye, month, sep = "_"))
+
+```
+
+
+# update info 
+## with new vars
+```{r}
+
+# ****** FUnction to query name in info ******
+var_summary <- function(names_vec = character()){
+  patt <- paste(names_vec, collapse = "|")  
+  m <- as.matrix(filter(info, grepl(patt, name, ignore.case = TRUE)))
+  rownames(m) <- m[,1]
+  print(kable(t(m), "simple"))
+  for(nm in m[,'name']){
+    cat(sprintf('\n%s\n', nm))
+    print(table(d[[nm]]))
+  }
+}
+
+
+# data.frame(new_var = setdiff(names(d), info$name), 
+#                                 dataset  = NA) %>% print
+
+# dput 
+new_vars_datasets <- structure(list(
+  name = c("DIAGNOSIS_binary", "DATE_coalesced", "sample", "ISOS_LOC_JF", "ISOS_LOC_CEN", "confounding_disease", "OTHER_DISEASE_PRESENT", "SEXF", "month", "MT2_quartile", "MT3_quartile", "MT4_quartile", "MT5_quartile", "MT01_rate", "MT02_rate","MT03_rate", "MT04_rate", "MT05_rate", "MT06_rate", "MT07_rate", "MT08_rate", "MT09_rate", "FA1", "FA3", "FA4", "FA2", "ACU_quintile", "FA_mean", "FA_mean_quintile", "FA1_quintile", "FA2_quintile", "FA3_quintile", "FA4_quintile", "FA1_rate", "FA3_rate", "FA4_rate", "FA2_rate", "FA_mean_rate", "parafovea", "parafovea_rate", "avg_MT_slope_sans3", "MT02_slope_rate", "MT03_slope_rate", "MT04_slope_rate", "MT05_slope_rate", "avg_MT_slope_sans3_rate", "SPHEQ", "myopic", "IR0_sum", "BRV0_sum", "DRV0_sum", "ICL0_sum", "LRT0_sum", "RAV0_sum", "VTV0_sum", "RPE_LK0_sum", "avg_MT_mean", "avg_MT_slope_mean", "chew_grade"), 
+  table = c("MH/DIAGNOSIS", "DEM/ENR/FAM/other", "DEM/ENR/FAM/other", "OCTMAIN", "OCTMAIN", "CF_FFA/FAF", "OCTMAIN", "DEM/ENR/FAM/other", "DEM/ENR/FAM/other", "OCTMT", "OCTMT", "OCTMT", "OCTMT", "OCTMT", "OCTMT", "OCTMT", "OCTMT", "OCTMT", "OCTMT","OCTMT", "OCTMT", "OCTMT", "VAA", "VAA", "VAA", "VAA", "VAA", "VAA", "VAA", "VAA", "VAA", "VAA", "VAA", "VAA", "VAA", "VAA", "VAA", "VAA", "OCTMT", "OCTMT", "OCTMT", "OCTMT", "OCTMT", "OCTMT", "OCTMT", "OCTMT", "VAA", "VAA", "CF_FFA", "CF_FFA", "CF_FFA", "CF_FFA", "CF_FFA", "CF_FFA", "CF_FFA", "CF_FFA", "OCTMT", "OCTMT", "MH/DIAGNOSIS")), 
+  row.names = c(NA, -59L), class = "data.frame")
+
+
+info <- full_join(info, new_vars_datasets)
+
+
+setdiff(names(d), info$name)
+setdiff(info$name, names(d))
+
+# remove rows of variables not in d
+info <- info[info$name %in% names(d) , ]
+
+```
+
+# = = = = = = = = = = = = = = = = 
+
+# Filtering data for SCE
+
+## subset data for different 'assays'
+
+### what vars
+exclude:
+  * factors and prescriptional vars BUT inlcude other VA
+  * engineered vars EXCEPT slope :> (sums, means, etc.)
+  * extremely missing vars :> ICL (later step)
+  * redundant vars :> stratus, cirrus, spectralis
+  * demographics
+```{r}
+
+str_vars <- names(d) %>% 
+  grep(x = ., 
+"I[dD]|sample|num|GENDER|ETHN|DIAG|SMK|SEXF|YR|RACE|SPH|CYL|AXIS|ACUIT|SNELL|LOGMAR|RW.*1$|VAA|FA\\d|FA_|chew|myopic|VIS|visit|_DATE|ENRDATE|coalesced|SITE|month|date|duration|OTHER|confounding|SIGSTR|rescaled_to_spectralis|stratus|cirrus|^spectralis|stratus|cirrus|spectralis|CHA[NG]{2}ES|ABNORM|sum|mean|slope|parafovea|variance|rate|RELATPROBND|NHO[SR]|DM|WGT|HGT|eye|duplicated|quintile|quartile|FAMILY", 
+    value = TRUE, invert = TRUE)
+  
+setdiff(names(d), str_vars) %>% sort()
+
+```
+
+### subset d for non-engineered measures vars
+```{r}
+#---
+# subset d for vars of interest and scale them
+#---
+d <- d %>% 
+  mutate(across(all_of(str_vars), ~ as.numeric(.)))
+
+## subset for measure vars
+measure_vars <- d %>% 
+  select(patID_eye, month, sample, all_of(str_vars)) %>% 
+  as.data.frame()
+
+rownames(measure_vars) <- measure_vars$sample
+```
+
+#### remove outlying missy variables
+```{r}
+
+(colSums(is.na(measure_vars))/nrow(measure_vars)) %>%
+  summary()
+# Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# 0.00000 0.01379 0.02544 0.08058 0.09446 0.87986 
+
+#---
+# filter outliers and missy variables
+#---
+
+# filter out variables with > min_out ratio missing
+# min ratio of missingness outliers for varaiables
+var_min_out <- boxplot(colSums(is.na(measure_vars))/nrow(measure_vars), main = "variable missingess")$out %>% min()
+# ^ minimum outlier of missingness  =  0.2462953 >> 24% missing
+
+hist(colSums(is.na(measure_vars))/nrow(measure_vars), breaks = seq(0, 1, .01), main = "Variable Missingness")
+axis(side = 1, at = seq(0, 1, 0.1))
+
+out_vars <-  names(measure_vars)[colSums(is.na(measure_vars))/nrow(measure_vars) >= 0.2 ]
+
+
+#---
+# remove vars who are skewed
+#---
+skw <- measure_vars %>% 
+  select_if(~is.numeric(.)) %>% 
+  sapply(psych::skew) %>%
+  abs() 
+# sort(skw)
+
+# look at how vars skewed
+hist(skw, breaks = seq(0, 200, 1), main = "Variable Skews")
+axis(side = 1, at = seq(0, 200, 10))
+
+# use threshold of 20
+skewed_vars <- skw[skw>30] %>% names()
+# "IR06"             "IR07"             "IR08"             "IR09"             "BRV06"           
+#  "BRV07"            "BRV08"            "BRV09"            "ICL01"            "ICL04"           
+#  "ICL06"            "ICL09"            "LRT06"            "LRT07"            "LRT08"           
+#  "LRT09"            "VTV07"            "VTV09"            "RPE_LK06"         "RPE_LK07"        
+#  "RPE_LK08"         "CENTERMIN_MICRON"
+#  ^ these vars are rare but do occur in pop
+
+# look at values
+sapply(skewed_vars, function(x){
+  measure_vars[[x]] %>% table
+})
+
+
+# add combine vars that are skewed or too missy
+out_vars <- unique(c(out_vars, skewed_vars))
+
+#---
+# remove vars >6
+#---
+zones_gr_6_vars <- colnames(measure_vars) %>%
+  grep("\\D0[789]$", ., value = TRUE) %>%
+  grep("avg", invert = TRUE, ., value = TRUE)
+# ^ "IR07"     "IR08"     "IR09"     "BRV07"    "BRV08"    "BRV09"    "ICL08"    "ICL09"    "LRT07"    "LRT08"   
+#   "LRT09"    "VTV07"    "VTV09"    "RPE_LK07" "RPE_LK08" "RPE_LK09"
+
+# add vars of zone > 6
+out_vars <- c(out_vars, zones_gr_6_vars)
+
+# remove variables
+measure_vars <- measure_vars %>% 
+  select(-all_of(out_vars))
+# 1] "FAZ"              "TYP_LEAK_RPE"     "EZLOSS"           "CENTER_MICRON"   
+#  [5] "CENTERMAX_MICRON" "CENTERMIN_MICRON" "BLRPATTERN"       "IR06"            
+#  [9] "IR07"             "IR08"             "IR09"             "BRV06"           
+# [13] "BRV07"            "BRV08"            "ICL09"            "LRT06"           
+# [17] "LRT07"            "LRT08"            "LRT09"            "VTV07"           
+# [21] "VTV09"            "IR07"             "IR08"             "IR09"            
+# [25] "BRV07"            "BRV08"            "BRV09"            "ICL08"           
+# [29] "ICL09"            "LRT07"            "LRT08"            "LRT09"           
+# [33] "VTV07"            "VTV09"            "RPE_LK07"         "RPE_LK08"        
+# [37] "RPE_LK09"        
+
+```
+
+#### remove outlying missy samples
+```{r}
+# filter for eye_visits with < min_out ratio missing
+## minimum ratio of missing among missing outliers
+samp_min_out <- boxplot(rowSums(is.na(measure_vars))/ncol(measure_vars), main = "sample missinness across features")$out %>% min()
+# ^ minimum outlier of missingness  = missing 25% >> 27%>>0.3367347
+
+hist(rowSums(is.na(measure_vars))/ncol(measure_vars), breaks = seq(0, 1, .01), main = " Missingness")
+axis(side = 1, at = seq(0, 1, 0.1))
+
+table(rowSums(is.na(measure_vars))/ncol(measure_vars) >= samp_min_out)
+# ^ FALSE  TRUE 
+# 12401   218 
+
+## what patients are missingness outliers
+out_samples <- measure_vars$sample[rowSums(is.na(measure_vars))/ncol(measure_vars) >= samp_min_out]
+
+# look at what data is missing for these samples
+ratio_missing <- colSums(is.na(measure_vars[measure_vars$sample%in% out_samples , ]))/nrow(measure_vars[measure_vars$sample%in% out_samples , ]) 
+ratio_missing %>% 
+  sort() %>% 
+  barplot(las = 2)
+# ^ mostly CFFFA vars
+
+# deselect outlier samples and variables from assay
+measure_vars <- measure_vars[ !rownames(measure_vars) %in% out_samples , ]
+
+```
+
+
+### filter out id cols and scale
+```{r}
+
+# make measure vars numeric matrix
+measure_vars <- measure_vars[, -which(colnames(measure_vars) %in% c("patID_eye", "month", "sample"))]
+measure_vars <- data.matrix(measure_vars)
+
+# scale measure vars
+scaled_measure_vars <- scale(measure_vars)
+
+measure_vars_scale_attr <- attributes(scaled_measure_vars)
+
+```
+
+
+## make single cell object
+```{r}
+
+
+## patient info indexed by sample, filter out out_samples that were filtered out in measured_vars
+patient_info <-
+  d %>% 
+  filter(sample %in% rownames(scaled_measure_vars) ) %>% 
+  select(-all_of(str_vars)) %>% 
+  select(-matches("avg_MT|spectr|cirru|stratu|0_sum|rate|quartil")) %>% 
+  as.data.frame()
+rownames(patient_info) <- patient_info$sample
+
+
+setdiff(names(d), names(patient_info))
+
+## variable info filtering for variables in the measure df
+# all(colnames(scaled_measure_vars) %in% info$name)
+variable_info <- 
+  info %>% 
+  filter(name %in% colnames(scaled_measure_vars)) %>% 
+  select(-matches("matched|dist"))
+rownames(variable_info) <- variable_info$name
+
+
+# reorder variable_info to match col order of measure var d
+# variable_info$variable[match(names(scaled_measure_vars) ,variable_info$variable )] == names(scaled_measure_vars)
+variable_info <- variable_info[ match(colnames(scaled_measure_vars) ,variable_info$name ), ]
+
+
+# check dims
+dim(scaled_measure_vars) == dim(measure_vars)
+dim(patient_info) == dim(scaled_measure_vars)
+nrow(variable_info) == ncol(scaled_measure_vars)
+all(rownames(variable_info) == names(scaled_measure_vars))
+all(rownames(patient_info) == rownames(scaled_measure_vars))
+# ^ all should be TRUE
+
+# add assays
+sce <- SingleCellExperiment(assays = list(measure_vars = measure_vars %>% t(), 
+                                          scaled_measure_vars = scaled_measure_vars %>% t()),
+                            colData = patient_info,
+                            rowData =variable_info
+                            )  
+
+# save d as metadata
+metadata(sce)$d <- d
+
+# add scale attr
+metadata(sce) <- append(metadata(sce), list(measure_vars_scale_attr=measure_vars_scale_attr))
+
+```
+
+### Rename Avg MT cols
+```{r}
+
+rownames(sce) <- str_remove_all(rownames(sce), "avg_")
+rowData(sce)$name <- str_remove_all(rowData(sce)$name, "avg_")
+
+```
+
+
+```{r, look at dims}
+
+as.data.frame(colData(sce)) %>% 
+  left_join(
+    as.data.frame(t(assays(sce)$scaled_measure_vars)) %>% 
+      rownames_to_column("sample")
+  ) %>% 
+  check_dims()
+# dims : 12525 134
+#                      [,1]
+# n_patIDs             3675
+# n_patID_eyes         7328
+# n_observations      12525
+# n_patIDs_w_gr_1_vis   516
+# ^ removed outlier patients and vars; and filtered out non-str/func vars
+
+### MARCH 17 2025 ###
+# dims : 12335 188
+# n_patIDs             3997
+# n_patID_eyes         7947
+# n_observations      12334
+# n_patIDs_w_gr_1_vis   490
+# ^ removeing vars with var_min_out >0.2462953  missingness and samples with missingness > .3
+
+dim(sce)
+
+```
+#_____________
+
+# Imputation and Dimensionality Reduction
+#### cluster variables by missingness
+```{r}
+
+# add missingness var to rowData
+rowData(sce)$msngns_ratio <- rowSums(is.na(assays(sce)$scaled_measure_vars))/ ncol(assays(sce)$scaled_measure_vars)
+
+m <- assays(sce)$scaled_measure_vars %>% 
+  t() %>% 
+  is.na() %>% 
+  {.*1}
+
+rownames(m) <-NULL
+
+# m_dist <- dist(t(m))
+# 
+# hc <- hclust(m_dist, method = "ward.D2")
+# 
+# plot(hc)
+# 
+# clust <- cutree(hc, k = 5)
+
+
+set.seed(10298)
+hm <- Heatmap(m[sample(seq(nrow(m)), 1e3), ],clustering_method_columns = "ward.D2", clustering_method_rows = "ward.D2" , col = c("white", "black"))
+
+pdf(sprintf("%sresults/clustering/09_clustering/imputation_QC/missingness_hm.pdf",wd_path), height = 20, width = 20)
+draw(hm)
+dev.off()
+
+set.seed(10298)
+var_hc <- hclust(dist(t(m)), method = "ward.D2")
+
+plot(var_hc)
+
+num_clust <- 5
+data_group_clusters <- cutree(var_hc, k = num_clust)
+data_group_clusters <- as.data.frame(data_group_clusters)
+
+# add to rowData
+rowData(sce)$msngns_clust <- data_group_clusters$data_group_clusters[match(rownames(data_group_clusters), rownames(rowData(sce)))]
+
+(data_groups <- split(rowData(sce)$name, rowData(sce)$msngns_clust))
+
+# plot hm and annotate by dataset type
+
+
+```
+
+
+
+#### Imputation QC##### Make test/train dataset
+```{r}
+
+# how many is actually missing?
+sum(is.na(assays(sce)$scaled_measure_vars ))/length(assays(sce)$scaled_measure_vars )
+# ^ ~5% of values NA
+
+
+# make truth dataset: no missing
+truth <- assays(sce)$scaled_measure_vars %>% 
+  t() %>% 
+  {.[rowSums(is.na(.))==0 , ]}
+
+# make test dataset and set 10% missing within each data_group
+test <- truth
+
+
+ratio_na <- .1
+row_inds_pool <- seq(nrow(test))
+# a list to save indices to 
+data_groups_missing_row_inds <- list()
+
+# seeds to use in iterative sampling
+set.seed(1202)
+seeds <- round(runif(length(data_groups), min = 10, max = 1e6) )
+
+# for each datagroup vector
+for(i in seq(data_groups)){
+  
+  # grab vars of data_groups at i
+  dat_group = data_groups[[i]]
+  
+  # sample 10% of rows
+  set.seed(seeds[i])
+  row_inds <- sample(row_inds_pool, floor(nrow(test)*ratio_na))
+  
+  # remove rows from future sampling
+  row_inds_pool <- row_inds_pool[-row_inds]
+  
+  # set these rows missing within this data group
+  test[row_inds, dat_group] <- NA
+  
+  # save inds
+  data_groups_missing_row_inds[[i]] <- row_inds
+  
+}
+
+# all inds should be same length
+purrr::map(data_groups_missing_row_inds, length)
+
+# see if artificial missingness recapitulates missinness in truth
+
+# # visualize with hm
+# m <- is.na(test[sample(seq(nrow(test)), 500), ])*1
+# rownames(m) <- NULL
+# Heatmap(m, col = c("white", "black"), clustering_method_columns = "ward.D2", use_raster = TRUE)
+
+# manually hc
+test_msngns_hc <- hclust(dist(t(is.na(test))))
+test_msngns_clust <- cutree(test_msngns_hc, k = num_clust)
+
+test_msngns_data_groups <- split(names(test_msngns_clust), test_msngns_clust)
+
+# for each data grooup, check that variables all the same
+for(i in seq(num_clust)){
+  print(all(test_msngns_data_groups[[i]] == data_groups[[i]]))
+}
+
+
+# save 2-d indices for later
+inds_2D <- which(is.na(test), arr.ind = TRUE)
+
+# check that indexing missing correct 
+sapply( sort(colnames(truth)), function(name){
+  # rows of inds where column ind  value matches corresponding col ind of name in truth
+  inds <- inds_2D[inds_2D[,2] == which(colnames(truth) == name),]
+  # check that missing where should be
+  cbind(all(is.na(test[inds])),all(!is.na(truth[inds])))
+}) %>% 
+  all()
+# ^ TRUE :)
+
+```
+
+<!-- ```{r test how indexing missing } -->
+
+<!-- # x <- matrix(rnorm(100),ncol = 4) -->
+<!-- x <- as.matrix(iris[,1:4]) -->
+<!-- y <- x -->
+<!-- ratio_na <- .2 -->
+<!-- set.seed(12048) -->
+<!-- yinds_1D <- sample(seq(length(x)), ratio_na*length(x)) -->
+<!-- y[yinds_1D] <- NA -->
+
+<!-- # save 2-d indices for later -->
+<!-- yinds_2D <- which(is.na(y), arr.ind = TRUE) -->
+
+<!-- x -->
+<!-- y -->
+<!-- yinds_2D -->
+
+<!-- ymice <- mice(y) -->
+
+<!-- ymean <- lapply(ymice$m, function(m){complete(ymice, action = m)}) %>%  -->
+<!--   Reduce("+", .) %>%  -->
+<!--   {./ymice$m} %>%  -->
+<!--   as.matrix() -->
+
+<!-- par(mfrow = c(2,2)) -->
+<!-- for(nm in colnames(x)){ -->
+<!--   inds <- yinds_2D[ yinds_2D[,2] == which(colnames(x) == nm)] -->
+<!--   plot(x[inds], ymean[inds], main = nm, xlab  = "actual", ylab = "predicted") -->
+<!-- } -->
+<!-- par(mfrow = c(1,1)) -->
+
+
+<!-- ``` -->
+
+
+##### test mice methods on 'test'
+```{r}
+
+# run imp and compare predicted to actual
+# m = 5
+m = 11
+meth <- "pmm"
+
+if(FALSE){
+  how.long(T)
+    imp_test <- mclapply(seq(m), function(n){
+      mice(test, m = 1, method = "pmm")
+    }, mc.cores = detectCores()-1)
+  how.long() 
+  # ^ 5min
+  
+  qs::qsave(imp_test, sprintf("%sprocessed_data/NA%.2f_%s_m%d_all_vars_imputation_test_imp_list.qs", wd_path, ratio_na, meth, m))
+}else{
+  imp_test <- qs::qread(sprintf("%sprocessed_data/NA%.2f_%s_m%d_all_vars_imputation_test_imp_list.qs", wd_path, ratio_na, meth, m))
+}
+
+
+# average imputations: iterate through mice list and select first complete df; reduce list with elementwise matrix sum of all; divide by m for average of matrices
+imp_mean <- lapply(seq(m), function(i){
+  complete(imp_test[[i]],1)
+}) %>% 
+  Reduce( "+", .) %>% 
+  {./m}
+
+```
+
+##### Evaluate mice imputation
+```{r}
+
+# dataframe to save predxactual R correlation
+corr_d <- data.frame(variable = character(), R = numeric(), p_value = numeric())
+
+# make imputation directory
+if(!dir.exists(sprintf("%sresults/clustering/09_clustering/imputation_QC/",wd_path))) dir.create(sprintf("%sresults/clustering/09_clustering/imputation_QC/",wd_path))
+
+pdf(sprintf("%sresults/clustering/09_clustering/imputation_QC/%s_%i.pdf",wd_path, meth, m), height = 20 , width = 75, bg = "white")
+par(mfrow = c(5, 20))
+for(name in sort(colnames(imp_mean))){
+  
+  # rows of inds where column ind  value matches corresponding col ind of name in truth
+  inds <- inds_2D[inds_2D[,2] == which(colnames(truth) == name),]
+  
+  # select inds where colname matches for col ind
+  actual <- truth[inds]
+  predicted <- imp_mean[inds]
+  
+  corr_test <- cor.test(actual, predicted, use = "complete.obs")  
+  corr <- as.numeric(corr_test$estimate)%>% round(.,3)
+  rmse <- rmse(actual, predicted) %>% round(.,3)
+  
+  title <-"%s;R=%.2f,RMSE=%.2f\nActual vs. Predicted %s at %i iterations" %>% 
+    sprintf( ., name,corr,rmse , meth, m)
+  
+  plot(actual, predicted, main = title)
+  add_lines()
+  
+  corr_d <- rbind(corr_d, data.frame(variable = name, R = as.numeric(corr_test$estimate), p_value = corr_test$p.value))
+}
+par(mfrow = c(1,1))
+dev.off()
+
+#  add missingness variable
+ratio_missing <-  apply(assays(sce)$scaled_measure_vars, 1, function(x){sum(is.na(x))/length(x)})
+ratio_missing <- as.data.frame(cbind(ratio_missing,variable = names(ratio_missing)))
+corr_d<- corr_d %>% 
+  left_join(ratio_missing)
+
+# save imputation correlations
+(corr_d <- corr_d[order(corr_d$R),])
+
+# # save corr_d to file
+# write_csv(corr_d, sprintf("%sprocessed_data/imputation_Rs/all_vars_impute_Rs.csv", wd_path))
+
+
+# make common var to join on 
+corr_d$name = corr_d$variable
+corr_d$variable <- NULL
+
+# add to rowdata
+corr_d <- corr_d[match(rownames(sce) , corr_d$name), ]
+
+if(all(rownames(sce) == corr_d$name)) rowData(sce) <- cbind(rowData(sce), corr_d[, -which(names(corr_d) == "name")]) else stop("check corr_d name order")
+
+```
+
+###### Corr bar
+```{r}
+
+# make significance bar
+corr_d$signif <- with(corr_d,
+                      ifelse(p_value<.001, "***", ifelse(p_value<.01, "**", ifelse(p_value<.05, "*", "not significant"))) %>%
+                        factor(., levels = c("***", "**", "*", "not significant"))
+)
+
+ggplot(corr_d, aes(R,reorder(name, R), fill = signif ))+
+  geom_bar(stat = "identity", show.legend = TRUE, position = "dodge", alpha = .8)+
+  geom_text(aes(label = sprintf("%s%%", round(as.numeric(ratio_missing), 3)*100) ))+
+  ggtitle(sprintf("Imputation performance across variables for between data type imputation (%s;m=%s)", meth, m), "Percentages indicate percentage missing in full dataset")+
+  scale_fill_viridis_d(begin = 1, end = 0)+
+  ylab("Feature")+
+  theme_bw()
+ggsave(sprintf("%sresults/clustering/09_clustering/imputation_QC/between_imputations_R_bar.pdf", wd_path), height = 12, width = 10)
+
+ggsave(sprintf("%sresults/publication_figures/between_imputations_R_bar.pdf", wd_path), height = 12, width = 10)
+
+```
+
+###### Average rho (fisher transformation)
+    
+    Pearson is nonlinear so i used the fisher transformation (atanh(rho)) to calculate the mean:
+    # Raw pearsons
+      rho.mean 0.2280444
+      rho.sd 0.1911418
+      rho.CI.lwr -0.1461240
+      rho.CI.upr 0.5451321
+    # With transformation:
+      z.mean 0.2485974
+      z.sd 0.2392857
+      z.CI.lwr -0.2206646
+      z.CI.upr 0.6244028
+```{r}
+
+# fisher Transformation of R
+
+# z = .5*ln((1+rho) / (1-rho)) = artanh(r), where artanh is the inverse hyperbolic tangent function. 
+fisher_transformation = function(r){
+  # .5*log( (1+r) / (1-r) )
+  atanh(r)
+}
+
+rho = corr_d$R
+z = fisher_transformation(rho)
+
+plot(rho, z)
+
+rho_mean = mean(rho, na.rm = TRUE)
+rho_sd = sd(rho, na.rm = TRUE)
+rho_CI = setNames(rho_mean +c(-1,1) * 1.96 *rho_sd , c("lwr", "upr")) 
+
+z_mean = mean(z, na.rm = TRUE)
+z_sd = sd(z, na.rm = TRUE)
+z_CI = setNames(z_mean +c(-1,1) * 1.96 *z_sd , c("lwr", "upr")) 
+
+# transform back to R
+res <- c(
+  "z.mean.backtransformed" = tanh(z_mean), 
+  "z.sd.backtransformed" = tanh(z_sd), 
+  "z.CI.backtransformed" = tanh(z_CI),
+  "rho.mean" = rho_mean, 
+  "rho.sd" = rho_sd, 
+  "rho.CI" = rho_CI
+  )
+
+t(t(res))
+
+```
+
+
+# Actual imputation
+
+## ** switch [ TRUE to run the imputation
+```{r}
+##
+####
+######
+########
+run_imputation <- FALSE
+########
+######
+####
+##
+```
+
+### impute 
+```{r}
+
+# params for imputation
+imp.method = "pmm"
+# imp.m = 5
+imp.m = 11 #(12 cores total)
+
+# run imp on scaled measure vars
+if(run_imputation){
+
+  # pred <- quickpred(assay(sce , "measure_vars") %>% t())
+  scaled_pred <- quickpred(assay(sce , "scaled_measure_vars") %>% t())
+  
+  # parralel impute imp.m times
+  how.long(T)
+    imp_of_scaled_l <- mclapply(seq(imp.m), function(n){
+      set.seed(23939)
+      mice(assay(sce , "scaled_measure_vars") %>% t(), m = 1, method = imp.method, predictorMatrix = scaled_pred)
+    },mc.set.seed = F, mc.cores = detectCores()-1)
+  how.long() # ~5min
+
+  qs::qsave(imp_of_scaled_l, sprintf("%s/processed_data/%s_m%d_scaled_measure_vars_imp_list.qs", wd_path, meth, m))
+  
+}else{
+  imp_of_scaled_l <- qs::qread(sprintf("%s/processed_data/%s_m%d_scaled_measure_vars_imp_list.qs", wd_path, meth, m))
+}
+
+# average imputations: iterate through mice list and select first complete df; reduce list with elementwise matrix sum of all; divide by m for average of matrices
+imp_of_scaled_avg <- lapply(seq(imp.m), function(i){
+  complete(imp_of_scaled_l[[i]],1)
+}) %>% 
+  Reduce( "+", .) %>% 
+  {./m}
+
+
+## look at how imputation works
+boxplot(imp_of_scaled_avg %>% scale, na.omit = TRUE, las  = 2)
+
+# add impute average to sce
+assay(sce, "pmm_imp_of_scaled") <- imp_of_scaled_avg %>% t
+
+
+```
+
+## fix some variables 
+
+## ensure ISOS_BREAK and ISOS_LOC correct
+    Set ISOS_LOC_CEN/JF to 0 if ISOS_BREAK 0
+```{r}
+ 
+
+# look at how loc impuuted
+isos <- assays(sce)$pmm_imp_of_scaled %>%
+  t() %>%
+  data.frame() %>%
+  select(matches("ISOS"))
+
+
+
+sds <- measure_vars_scale_attr$`scaled:scale`
+means <- measure_vars_scale_attr$`scaled:center`
+
+# rescale to original distr: mutiply each row elementwise by sds, do same summing with mean
+isos_rescaled <- isos %>%
+  sweep(2, sds[names(isos)], "*") %>%
+  sweep(2, means[names(isos)], "+")
+
+# plot distribution before and after unscale
+par(mar = c(5,5,3,3))
+isos %>% unlist() %>%density() %>% plot(xlim = c(-3, 3), ylim = c(0, 2)) # txtdensity(width = 100, height = 10) 
+isos_rescaled %>% unlist() %>%
+  density() %>% 
+  lines(col = "blue", lw = 2) # txtdensity(width = 100, height = 10) 
+
+
+isos_rescaled%>%
+  mutate_all(round) %>%
+  group_by(across(everything())) %>% 
+  mutate(count = n()) %>% 
+  distinct() %>% 
+  arrange(desc(count), desc(ISOS_BREAK)) %>% 
+  ungroup() %>% 
+  rowwise() %>% 
+  mutate(bar = paste( rep("█",  max(1,ceiling(count/90)) ), collapse = "" )) %>% 
+  print(n = 100)
+# ISOS_BREAK ISOS_LOC_JF ISOS_LOC_CEN count bar                                                          
+#          2           0            1  5487 █████████████████████████████████████████████████████████████
+#          2           1            0  4195 ███████████████████████████████████████████████              
+#          0           0            0  1864 █████████████████████                                        
+#          1           1            0   618 ███████                                                      
+#          1           0            1    83 █                                                            
+#          1           0            0    19 █     # set to missing? no, set to JF, assuming they are early on        
+#          2           0            0    10 █     # set to missing? no, set to JF, assuming they are early on        
+
+
+# round to id values to replace
+isos_rescaled_round <- isos_rescaled %>% 
+  apply(.,2,round) 
+
+# grab samps to make JF 1 where curretnly it is 0
+make_1_samps <- isos_rescaled_round[isos_rescaled_round[, 1] %in% c(2,1) & isos_rescaled_round[,2]== 0 & isos_rescaled_round[,3]== 0,] %>% rownames()
+
+isos[,"ISOS_LOC_JF"] %>%density() %>% plot(xlim = c(-3, 3), ylim = c(0, 3.5)) # txtdensity(width = 100, height = 10) 
+isos_rescaled[,"ISOS_LOC_JF"] %>% 
+  density() %>% 
+  lines(col = "blue", lw = 2) # txtdensity(width = 100, height = 10) 
+
+# scale 1 back to assay distr to add back
+val_1 <- (1-means["ISOS_LOC_JF"])/sds["ISOS_LOC_JF"]
+
+# set samps at ISOS_LOC_JF to val
+assays(sce)$pmm_imp_of_scaled["ISOS_LOC_JF",make_1_samps] <- val_1
+
+
+
+```
+
+### Calculate foveal slope and average parafoveal zones
+```{r}
+
+assay <- assays(sce)$pmm_imp_of_scaled %>% 
+  t() %>% 
+  as.data.frame()
+
+# average parafovea
+parafovea <- rowMeans(assay[, grep("MT0[2345]", colnames(assay))])
+
+# add to assay
+assay <- cbind(assay, parafovea)
+
+# ****** Function: calculate slope angle in degrees from zone 1 up to zone 2,3,4,5 ******
+## difference in thickness over distance to zone (convert from rad to deg)
+calc_slope <- function(sector_of_interest, sector_one){
+    180 *  (atan((sector_of_interest - sector_one) / 500)) / pi
+  }
+
+# use avg columns
+inner_zones <- grep("MT0[12345]", colnames(assay), value = TRUE)
+
+# scales for rescaling
+## rename 
+names(attributes(scaled_measure_vars )$`scaled:scale`) <- str_remove_all(names(attributes(scaled_measure_vars )$`scaled:scale`), "avg_")
+names(attributes(scaled_measure_vars )$`scaled:center`) <- str_remove_all(names(attributes(scaled_measure_vars )$`scaled:center`), "avg_")
+
+sds <- attributes(scaled_measure_vars )$`scaled:scale`
+means <- attributes(scaled_measure_vars )$`scaled:center`
+
+
+# nm <- "ISOS_LOC_CEN"
+# rescale to original; 
+for(colnm in inner_zones){
+  where <- which(names(sds) == colnm)
+  assay[,colnm] <-  (assay[where]*sds[where] )+ means[where]
+}
+
+
+# calculate slope against zone 1
+assay <- assay %>% 
+  mutate(across(all_of(inner_zones[-1]),
+                ~calc_slope(., MT01),
+                .names = "{.col}_slope"
+                )) %>% 
+  mutate(across(matches("MT0"), ~as.numeric(scale(.))))
+
+assay <- data.matrix(t(assay))
+
+# add new vars to rowdata
+# dput(data.frame(rowData(sce))[0,])
+new_rowdat <-structure(list(name = "parafovea", table = NA, table_description = "OCTMT", description = "Average of parafoveal zones 2-5", shorthand = NA, 
+    X0 = NA, X1 = NA, X2 = NA, X3 = NA, X4 = NA, X5 = NA, X6 = NA, continuous = TRUE, nominal = FALSE, zonal = FALSE, can_resolve = FALSE, 
+    ordinal = FALSE, msngns_ratio = NA, msngns_clust = NA, R = NA, p_value = NA, ratio_missing = NA), class = "data.frame", row.names = c(NA, -1L))
+
+other_new_rowdat <- new_rowdat[rep(1,length(inner_zones)-1)  , ]
+
+other_new_rowdat$name <- paste(inner_zones[-1], "slope", sep = "_")
+other_new_rowdat$description <- "Slope in degrees from zone 1 to parafoveal zone"
+
+both_new_rowdat <- rbind(new_rowdat, other_new_rowdat)
+rownames(both_new_rowdat) <- both_new_rowdat$name
+
+rowdat <- as.data.frame(rowData(sce) )
+
+rowdat <- rbind(rowdat, both_new_rowdat)
+
+# make new experiment with added data
+
+na_rows <- rbind(parafovea = rep(NA, ncol(sce)), 
+                 MT02_slope = rep(NA, ncol(sce)),
+                 MT03_slope = rep(NA, ncol(sce)),
+                 MT04_slope = rep(NA, ncol(sce)),
+                 MT05_slope= rep(NA, ncol(sce))
+                 )
+colnames(na_rows) <- colnames(sce)
+
+measure_vars_new = rbind(assays(sce)$measure_vars, na_rows)
+scaled_measure_vars_new = rbind(assays(sce)$scaled_measure_vars, na_rows)
+
+rowdat <- rowdat[match(rowdat$name, rownames(assay)) , ]
+
+all(rownames(rowdat) ==rownames(assay))
+
+purrr::map(list(measure_vars_new = measure_vars_new,scaled_measure_vars_new=scaled_measure_vars_new,  assay=assay,colData= colData(sce), rowdat=rowdat), dim)
+
+
+# construct new experiment
+new_sce <- SingleCellExperiment(assays = list(measure_vars = measure_vars_new, 
+                                          scaled_measure_vars = scaled_measure_vars_new, 
+                                          pmm_imp_of_scaled = assay),
+                            colData = colData(sce),
+                            rowData =rowdat
+                            )  
+
+metadata(new_sce) <- metadata(sce)
+
+sce <- new_sce
+
+```
+
+
+
+# filter out variables 
+## that didnt impute well
+```{r}
+
+# variables with non-significant correraltion btw actual and predicted and missingness > 5%
+(rm_vars <- corr_d$name[!is.na(corr_d$p_value) & corr_d$p_value>.05 & corr_d$ratio_missing>.05])
+# "ICL02" "ICL06" "RW014" "MT06"  "MT07"  "MT08"  "MT09" 
+
+sce <- sce[-which(rownames(sce) %in% rm_vars) , ]
+
+```
+
+## remove parafovea 
+```{r}
+
+# og parafovea now redundant, replace with new one
+colData(sce)$parafovea <- NULL
+
+colData(sce)$parafovea <- assays(sce)$pmm_imp_of_scaled["parafovea",]
+
+sce <- sce[-which(rownames(sce) == "parafovea") , ]
+
+
+```
+
+
+#___________________________
+# calculate reduced dims and distance
+### ** switch [ TRUE to calculate distance and run reduced dims
+```{r}
+##
+####
+######
+########
+run_rdims <- TRUE
+########
+######
+####
+##
+```
+
+### calculate distance run PCA, TSNE, and UMAP
+```{r}
+
+
+# SET PARAMS----
+
+# umap_params <- list(x = sce, dimred =  "PCA", metric = "euclidean", spread = 1.2, min_dist = 0.005, n_trees = 25, n_neighbors = 15, search_k = 750) # pre isos_loc_JF fix
+# umap_params <- list(x = sce,   dimred = "PCA", metric = "cosine", spread = 0.8, min_dist = 0.005, n_trees = 25, n_neighbors = 10, search_k = 500) # post isos_loc_JF fix
+# umap_params <- list(x = sce,   dimred = "PCA", metric = "cosine", spread = 0.8, min_dist = 0.005, n_trees = 25, n_neighbors = 10, search_k = 500) # post isos_loc_JF fix
+
+# umap_params <- list( dimred = "PCA", metric = "cosine", spread = 1.2, min_dist = 0.005, n_trees = 25, n_neighbors = 20, search_k = 1000, seed = 29209)
+umap_params <- list( dimred = "PCA",  metric = "euclidean", spread = 1.2, min_dist = 0.02, n_trees = 50, n_neighbors = 20, search_k = 2000, seed = 29209)
+
+
+# set.seed(29209)
+# exag <- 20 # 12
+# tsne_par <- list(x = sce, dimred = structure(1L, levels = "PCA", class = "factor"),
+#               perplexity = 400, # 50, # increases sphericity of points
+#               momentum = 0.9, # 0.9,
+#               final_momentum = 0.5, #0.9,
+#               eta = floor(ncol(sce)/exag),  #100,
+#               exaggeration_factor = exag #12
+#               )
+# 
+# tsne_par <- list(x = sce, dimred = structure(1L, levels = "PCA", class = "factor"), 
+#               perplexity = 50, # 50, 
+#               momentum = 0.9, # 0.9, 
+#               final_momentum = 0.9, #0.9,
+#               eta = 100,  #100, 
+#               exaggeration_factor = 12 #12
+#               )
+#+ ^ rules of thumb i infered: hi momentum, high perplexity, low eta, high final momentum, high momentum, medium exageration factor, 
+  
+tsne_params <- list(dimred =  "PCA",perplexity = 50,final_momentum = 0.9,momentum =0.5,eta = 100,exaggeration_factor = 4 , seed  = 29209)
+
+# RUN RDIMS ----
+if(run_rdims){
+  
+  set.seed(29209)
+  sce <- runPCA(sce,exprs_values = "pmm_imp_of_scaled" )
+  
+  umap_par <- append(umap_params[-which(names(umap_params) == "seed")], list(x = sce))
+  set.seed(umap_params$seed)
+  sce <- do.call(runUMAP, umap_par)
+  
+  tsne_par <- append(tsne_params[-which(names(tsne_params) == "seed")], list(x = sce))
+  set.seed(tsne_params$seed)
+  sce <- do.call(runTSNE, tsne_par)
+  
+  # save separate sce that contains reduced dims
+  qsave(sce, paste0(wd_path, "processed_data/sce_reduced_dims.qs"))
+  
+}else{
+  # put reducued dims dims into sce
+  sce_reduced_dims <- qread(paste0(wd_path, "processed_data/sce_reduced_dims.qs"))
+  
+  # metadata(sce)$distance <- metadata(sce_reduced_dims)$distance
+  reducedDims(sce)$PCA <- reducedDims(sce_reduced_dims)$PCA
+  reducedDims(sce)$TSNE <- reducedDims(sce_reduced_dims)$TSNE
+  reducedDims(sce)$UMAP <- reducedDims(sce_reduced_dims)$UMAP
+  rm("sce_reduced_dims")
+}
+
+# add params to metadata
+metadata(sce) <- append(metadata(sce), list(params = list(tsne = tsne_params, umap = umap_params)))
+
+sce
+
+# pmm_pca <- reducedDim(sce)
+# 
+# attributes(pmm_pca)$rotation %>%
+#   as.data.frame() %>%
+#   rownames_to_column("var") %>%
+#   select(var, PC1:PC3) %>%
+#   pivot_longer(matches("PC"), names_to = "PC") %>%
+#   ggplot(aes(y = reorder_within(var, value, PC), x= value, fill = var))+
+#   geom_bar(stat = "identity", orientation = "y", show.legend = FALSE)+
+#   facet_wrap(~PC, scales = "free_y")+
+#   scale_y_reordered() +
+#   theme(axis.text.y = element_text(size = 4))+
+#   ggtitle("Imputed assay (scaled) PCA loadings\n(free_y)")
+# 
+# if(!dir.exists(paste0(wd_path, "results/clustering/09_clustering/dimred"))) dir.create(paste0(wd_path, "results/clustering/09_clustering/dimred"))
+# 
+# ggsave(paste0(wd_path, "results/clustering/09_clustering/dimred/PCA_rotations.png"), height = 10, width = 20 )
+
+
+```
+
+
+
+# = = = = = = = = = = = 
+# save data
+```{r}
+
+metadata(sce)$info <- info
+metadata(sce)$raw <- raw
+
+# save SCE
+saveHDF5SummarizedExperiment(sce, paste0(wd_path, "processed_data/sce001.h5"), replace = T)
+
+# notify.me("09_clustering_imp_and_dimred.Rmd complete")
+
+```
+
+
+
+```{r, look at dims}
+
+as.data.frame(colData(sce)) %>% 
+  left_join(
+    as.data.frame(t(assays(sce)$scaled_measure_vars)) %>% 
+      rownames_to_column("sample")
+  ) %>% 
+  check_dims()
+# dims : 12525 143
+#                      [,1]
+# n_patIDs             3675
+# n_patID_eyes         7328
+# n_observations      12525
+# n_patIDs_w_gr_1_vis   516
+# ^ added clustering variables and letter averages
+
+### MARCH 19 2025 ###
+# dims : 12276 169
+# n_patIDs             3971
+# n_patID_eyes         7888
+# n_observations      12275
+# n_patIDs_w_gr_1_vis   492
+
+dim(sce)
+
+```

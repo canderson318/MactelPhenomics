@@ -1,0 +1,22 @@
+Dear Hongbo Guo,
+
+We are pleased to submit our manuscript, “Precision Mapping of Retinal Disease: Identification of Differential Progression Trajectories via Imaging Phenomics”, for consideration as a research article in iMeta Med.
+
+Understanding of the drivers of disease progression is a widely recognised important target of future work in complex diseases. This typically requires expensive, hard-to-find longitudinal data from large patient cohorts.
+
+In this work, we present a new, highly generalizable analysis paradigm for large-scale cross-sectional clinical phenomics data by repurposing single-cell analysis techniques and show how these can be used to elucidate, among other results, unobserved progression bifurcations in progressive diseases. 
+
+In this study, we used 7,888 eyes (3,971 patients) with 87 clinically graded phenotypes from a multi-center retinal imaging biobank of patients suffering from the degenerative retinal disease, macular telangiectasia type 2 (MacTel). By adapting analysis paradigms commonly used in scRNAseq to our imaging grading, we obtained 12 clinically distinct clusters of eyes. Subsequently, pseudotime analysis revealed that clusters spanned the disease severity continuum, and their resulting pseudo-progression score holistically measured a disease progression scale, only partially captured by known clinical severity grading of the disease. Clinical characterization of the clusters confirmed the severity differences across clusters. Using trajectory inference (commonly used to detect cell differentiation pathways) on clinical imaging uncovered two previously unknown divergent disease progression routes. A small subset of available longitudinal data validated this result. By integrating genomics SNP data, we found that disease-risk genetic markers are responsible for part of the differential disease trajectory, as well as for disease phenotype heterogeneity. We also show that a continuous pseudo-progression score can be used to discover non-linear long-term progression trends using only short-term longitudinal data. We showcase that this is a generalizable framework and the methods presented here can apply to any disease with deep clinical phenotyping.
+
+We believe our article would be of great interest to your readers. First, our study shows that large databases of imaging-derived phenotypes have great translational relevance as they can be used for actionable disease subtyping and stratification. The inclusion of omics data, such as genomics, can additionally shed light on the underpinning molecular mechanism of disease diversification. We also show methodological novelty with a reproducible analysis pipeline using well-validated and widely available tools, applying this to a complex retinal disease, identifying novel clinically-relevant insights.
+
+To the best of our knowledge, this is the first study to adapt scRNA-seq style pseudotime/trajectory to clinical imaging phenomes. Additionally, our approach demonstrates that looking beyond clinical linear staging and integration of multi-modal imaging phenotypes creates progression scores that capture more granular clinical severity.
+
+We appreciate your consideration and look forward to hearing from you.
+
+Sincerely,
+
+Roberto Bonelli, PhD
+Principal Scientist, Lowy Medical Research Institute
+3366 N Torrey Pines Ct STE 300, La Jolla, CA 92037, US
+rbonelli@lmri.net, (858) 249-7106

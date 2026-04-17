@@ -1,0 +1,548 @@
+---
+title: "03_EDA exploration continued"
+author: "Christian Anderson"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# packages
+```{r, message=FALSE, warning=FALSE, results='hide', echo = TRUE}
+
+library(ggplot2)
+library(tidyverse)
+library(dplyr)
+library(reshape2)
+library(gridExtra)
+library(viridis)
+library(DescTools)
+library(SummarizedExperiment)
+library(corrplot)
+library(knitr)
+
+
+
+
+rm(list = ls())
+gc()
+
+# my functions
+source("~/Library/CloudStorage/OneDrive-LowyMedicalResearchInstitute/Database_EDA/analysis_versions/version015/analysis/00_MyFunctions.R")
+
+```
+
+# Load Data
+```{r}
+wd_path <- "~/Documents/LMRI/PRJ2024001/version015/"
+
+
+data_name <- "CF_FFA_DEM_DIAGNOSIS_ENRNHOR_ENRNHOS_FAFGRADE_FAMSTATUS_MH_OCTMAIN_OCTMTCIRRUS_OCTMTSPECTRALIS_OCTMTSTRATUS_VAA_lea_03.rds"
+d <- readRDS(paste0(wd_path,"processed_data/", data_name))
+
+raw <- readRDS(paste0(wd_path,"processed_data/dfs_list_01.rds"))
+
+# grading nomenclature and information
+path <- paste0(wd_path,"processed_data/database_grading_key_complete.xlsx")
+info <- readxl::read_xlsx(path) %>% as.data.frame()
+
+```
+# = = = = = = = = = = = = = = = = = = = = = = 
+
+# clean data
+
+```{r, look at dims}
+
+check_dims <- function(D = d){
+  
+  cat(paste0("\ndims : ", paste(dim(D), collapse = " "),"\n"))
+  
+  n_patIDs <- D %>% 
+    select(patID, visitID, eye_num) %>% 
+    drop_na() %>% 
+    pull(patID ) %>% 
+    n_distinct(na.rm = TRUE)
+  
+  n_patID_eyes <- D %>% 
+    select(patID, visitID, eye_num) %>% 
+    drop_na() %>% 
+    select(patID, eye_num) %>% 
+    n_distinct(na.rm = TRUE)
+  
+  n_observations <- D %>% 
+    select(patID, visitID, eye_num) %>% 
+    drop_na() %>% 
+    n_distinct(na.rm = TRUE)
+  
+  n_patIDs_w_gr_1_vis <- D %>% 
+    select(patID, visitID, eye_num) %>% 
+    drop_na() %>% 
+    filter(n()>1, .by = c(patID, eye_num)) %>% 
+    pull(patID) %>% 
+    n_distinct(na.rm = TRUE)
+  
+  print(rbind(n_patIDs,n_patID_eyes,n_observations,n_patIDs_w_gr_1_vis))
+  
+}
+
+check_dims()
+
+# dims : 12600 288
+# n_patIDs             3693
+# n_patID_eyes         7386
+# n_observations      12600
+# n_patIDs_w_gr_1_vis   516
+
+
+### MARCH 12 2025 ###
+# dims : 12619 288
+# n_patIDs             4034
+# n_patID_eyes         8063
+# n_observations      12617
+# n_patIDs_w_gr_1_vis   500
+
+```
+
+
+## fix ordinality
+* subset for diagnosis
+* make image quality  factor grades, maintain levels of increase, collapse scores that essentially mean the same thing,  NA for 5<
+    * DRV: ?
+    * YELLRND: maintain 0-4
+    * NEOVASC: 2< ==>2 
+    * FAZ: ?
+
+
+### Fix ordinality
+#### make zonal vars numeric
+```{r}
+# for the categories with <phenotype>01-09
+## select the spatial phenotypes
+zonal_vars <-  grep("\\D0\\d$", names(d), value = TRUE)
+
+# make zonal vars numeric
+d <- d %>% 
+  mutate(across(all_of(zonal_vars), 
+                ~ as.numeric(.)))
+```
+
+
+#### make separate ISOS loc vars
+    
+    Add ISOS_LOC. Make it dichotomous{ISOS_BREAK CENTRAL, ISOS_BREAK_JUXTAFOVEAL
+```{r}
+
+info %>% filter(grepl("ISOS", name)) %>% select(name, description, `0`:`6`)
+
+
+# # check isos_loc coding
+# View(read.xlsx("/Users/christiananderson/Library/CloudStorage/Egnyte-lmri/Shared/LMRI/DS_Group/PRJ2024001/info/Grading fields and variables_edited.xlsx", sheet = 2))
+
+# make juxtafoveal and central isos location variables
+d$ISOS_LOC_JF <- as.numeric(d$ISOS_LOC == 2)
+d$ISOS_LOC_CEN <- as.numeric(d$ISOS_LOC == 1)
+
+d %>% 
+  select(matches("ISOS")) %>% 
+  distinct() %>% 
+  head(10)
+
+# remove isos_loc
+d$ISOS_LOC <- NULL
+
+```
+
+
+#### enforce ordinality
+      
+    - make other disease character/nominal
+    - reorder FAZ to correlate to severity
+    - cap yellowrnd at 2
+    - make BLRPATTERN dichotomous
+    - with vars that go over 2 {ICL_TYPE, TYP_LEAK_RPE, NEOVASC, DRV01DRV02DRV03DRV04DRV05, FAZ, IR03IR05, BRV03BRV05, LRT05, RAV05, VTV05, CRYSTALDEP, RET_ATROPH, RAV, FOVABNORM, CTR_PT_INVOLV, AF_INCREASED_1DD, LARGEAREA_DECR_AF, LOCAL_DECR_AF_VESL_END}
+      - make confounding disease column that codes for where 6
+      - make OTHER_DISEASE_PRESENT that combines counfouding disease with OTHER_DISEASE
+      - set 6s to NA
+      - set all > 2 to 2 
+
+```{r}
+
+info %>% 
+  filter(nominal&ordinal) %>% 
+  select(name,description, matches("\\d")) 
+
+# OTHER_DISEASE
+#+ make nominal
+#+ name            description           0            1             2                                 3    4
+#+ OTHER_DISEASE Other disease visible? Absent Macular hole Lamellar hole Macular edema unrelated to MacTel <NA>
+d <- d %>% 
+  mutate(OTHER_DISEASE = as.character(OTHER_DISEASE)) %>% 
+  mutate(OTHER_DISEASE= case_when(
+    OTHER_DISEASE == '0' ~ "0_Absent",
+    OTHER_DISEASE == '1' ~ "Macular hole",
+    OTHER_DISEASE == '2' ~ "Lamellar hole",
+    OTHER_DISEASE == '3' ~ "Macular edema unrelated to MacTel", 
+    TRUE~OTHER_DISEASE
+  ))
+
+
+# change these
+info[info$name== "OTHER_DISEASE", c("nominal", "ordinal")] <- c(TRUE, FALSE)
+
+# FAZ : foveal avascular zone:> enlargement of the FAZ has been found to negatively correlate with visual acuity (https://pmc.ncbi.nlm.nih.gov/articles/PMC7190136/)
+## 0 absent, 1 standard, 2 Greater than standard, 3 smaller than standard, 4 very small
+## XXX 1>>0, 2>>3, 3>>2, 4>>1XXX
+##  4~1 3~2 1~3 2~4 (new)
+d <- d %>% 
+  mutate(FAZ = as.numeric(FAZ)) %>% 
+  mutate(across(FAZ, ~ case_when(
+    . == 4~1,
+    . == 3~2,
+    . == 1~3,
+    . == 2~4,
+    TRUE ~ .
+  ))) 
+
+# YELLOWRND : Eyes with MacTel have multiple tiny, yellow, crystalline deposits on the inner retinal surface adjacent to the telangiectasis (Figure 3). Nearly half of the patients exhibit crystalline deposits (60% bilaterally), but they do not correlate with the severity of disease (https://pmc.ncbi.nlm.nih.gov/articles/PMC9553319/)
+## 0 absent, 1 Questionable,	2 Present: <250 micron,	3 Present: >250 micron,	4 Present: outside the fovea
+## make anything over 1 to 2
+d <- d %>% 
+  mutate(YELLOWRND = as.numeric(YELLOWRND)) %>% 
+  mutate(across(YELLOWRND, ~ case_when(
+    . > 1 ~ 2, 
+    TRUE ~ .
+  )))
+
+# make BLRPATTERN dichotomous
+## Yes >> 1, No >> 0
+d$BLRPATTERN %>% unique()
+d <- d %>% 
+  mutate(across(BLRPATTERN, ~case_when(
+    . == "Yes" ~ "1", 
+    . == "No"  ~ "0", 
+    TRUE ~ .
+  ) %>% as.numeric()
+  ))
+
+# grading vars that go > 2
+grading_over_two <- d %>% 
+  select(-matches("RW")) %>%
+  select(any_of( info %>% filter(grepl("CF|OCT|MT|FAF", table)) %>% pull(name)  )) %>%
+  map(function(x) {
+    if(n_distinct(x)<20 & is.numeric(x)){
+      max(x, na.rm = TRUE)>2
+    }
+  }) %>% 
+  Filter(isTRUE, .) %>% 
+  names()
+#+ 
+#+ ICL_TYPE TYP_LEAK_RPE NEOVASC DRV\\d YELLOWRND FAZ IR\\d BRV\\d LRT\\d RAV0\\d VTV\\d CRYSTALDEP RET_ATROPH RAV FOVABNORM CTR_PT_INVOLV AF_INCREASED_1DD LARGEAREA_DECR_AF  LOCAL_DECR_AF_VESL_END
+#+ 
+
+sapply(grading_over_two, function(x) d[[x]] %>% table)
+#+ ^ max is grade 6 across these
+#+ 
+
+info %>% 
+  filter(name%in% grading_over_two) %>% 
+  distinct(shorthand, .keep_all = T) %>% 
+  select(name, description, `0`:`6`) %>% 
+  as.data.frame()
+# for these, anything > 2 &<6 is redundant
+
+# make confounding disease column, 1 when 6 and 0 otherwise
+d <- d %>% 
+  mutate(confounding_disease  = rowMaxs(as.matrix(across(all_of(grading_over_two)), na.rm = TRUE), na.rm = TRUE)) %>% 
+  mutate(confounding_disease = as.numeric(confounding_disease == 6))
+
+# make var for where other disease not absent and value is 6 (counfounding disease)
+d$OTHER_DISEASE_PRESENT <- with(d, 
+                                OTHER_DISEASE !="0_Absent" | confounding_disease
+                                ) %>% as.numeric()
+
+# set  NA due to confounding disease to missing 
+d <- d %>% 
+  mutate(across(all_of(grading_over_two), ~ifelse(.==6, NA, .)))
+
+
+# then, for same vars with values > 2, set those to 2
+d <- d %>% 
+  mutate(across(all_of(grading_over_two), 
+                ~ifelse(.>2, 2, .) 
+                ))
+
+```
+
+## subset DATA
+```{r subset for case}
+
+# select for diagnosed
+yes_d <- subset(d, DIAGNOSIS == "yes"& !is.na(eye_num))
+
+```
+
+#+++++++++++++++++++++++++++++++
+
+# arrange data for plotting
+* make data frame of counts for each categories eyes and zones  
+e.g. >> df[ , (zone, score, x, y)] ... for each category
+
+```{r make patterns to search for}
+
+# make df of patterns and their labels
+patts <- c("^IR.*\\d$","^BRV.*\\d$" , "^DRV.*\\d$", "^LRT.*\\d$", "^RAV.*\\d$", "^VTV.*\\d$", "^RPE_LK.*\\d$", "^ICL.*\\d$", "avg_MT.*\\d$",  "_slope$")
+
+patt_names <-  c("Irregular RPE", "Blunted retinal vessels", "Dilated retinal vessels", "Loss of retinal trans", "Right angle vein", "Visible tele vessel",
+                                     "RPE leakage", "Inner cap leakage",  "Macular thickness (Spectralis)",  "Foveal Slope")
+pattern_df <- as.data.frame(cbind(pattern = patts , 
+                                     label = patt_names))
+                            
+```
+
+### melt_mean function
+```{r function to summarize areas as mean }
+
+# data = yes_d
+# pattern = "^IR.*\\d$"
+
+# for a pattern in df d, melt those variables into a new df
+melt_mean <- function(data , pattern= character()){
+  print(pattern)
+  
+    df <- data %>% 
+      select(patID_eye, DATE_coalesced, matches(pattern))
+    
+    # make long 
+    df_m <- reshape2::melt(df, value.name = "score", variable.name = "zone")
+    
+    # make char, not factors
+    df_m  <- df_m  %>%
+      mutate_all( ~as.character(.))
+    
+    # make num zone
+    if (pattern != "_slope$"){
+      df_m$zone_num <- substr(df_m$zone, nchar(df_m$zone), nchar(df_m$zone)) %>% as.numeric() 
+    }else{
+      df_m$zone_num <- substr(df_m$zone, nchar(df_m$zone)-7, nchar(df_m$zone)-6) %>% as.numeric() 
+    }
+    # subset the data for score and zone without NAs
+    sub_df <-df_m %>% 
+      filter(!is.na(score)) %>% 
+      select(zone_num, score)
+    
+    # make numeric
+    sub_df$score <- sub_df$score %>%
+      as.numeric()
+    
+    # aggregate by zone
+    summarized_df <- aggregate(score ~ zone_num, data = sub_df, FUN = mean)
+    summarized_df$zone_num <-summarized_df$zone_num %>% 
+      factor()
+    
+    # add NA zones for plotting
+    na_df <- data.frame(zone_num = as.character(1:9),
+                        score = NA)
+    
+    
+    summarized_df_full <- na_df %>% 
+      left_join(summarized_df, by = "zone_num", suffix = c(".na", ".sum")) %>% 
+      mutate(score = coalesce(score.sum, score.na)) %>%
+      select(zone_num, score)
+      
+return(summarized_df_full)
+}
+
+
+```
+
+
+# loop through patterns, apply function and plot for patients with mactel
+
+```{r}
+# for each pattern apply function melt_mean
+plots <- list();summ_dfs <- list();   for (i in 1:nrow(pattern_df)){
+      
+       # summarize columns with patt
+      melt_mean_df <- melt_mean(yes_d, pattern_df$pattern[[i]])
+      
+      # save to list of dfs
+      summ_dfs <- summ_dfs %>% append(list(list(name = pattern_df$label[[i]],
+                                          data = melt_mean_df)))
+      # plot counts for each zone to polygons resembling etdrs grid
+      positions <- data.frame(
+        zone_num = rep(melt_mean_df$zone_num, each = 4), # repeat zone_num for times each  
+        
+         x = c(-1,1,1,-1,
+               -3,3,1,-1,
+               1,3,3,1,
+               -1,1,3,-3,
+               -3,-1,-1,-3,
+               -5,5,3,-3,
+               3,5,5,3,
+               -3,3,5,-5,
+               -5,-3,-3,-5),
+         
+          y = c(1,1,-1,-1,
+                3,3,1,1,
+                1,3,-3,-1,
+                -1,-1,-3,-3,
+                3,1,-1,-3,
+                5,5,3,3,
+                3,5,-5,-3,
+                -3,-3,-5,-5,
+                5,3,-3,-5)
+      )
+      
+      
+      
+      values <- data.frame(
+        zone_num = melt_mean_df$zone_num,
+        value = melt_mean_df$score
+      )
+      
+      # merge values and shape coordinates into one 
+      datapoly <- merge(values, positions, by = c("zone_num"))
+      
+      # make df of etdrs zone labels
+      shape_labels <- data.frame(
+        label = c("Cen", "Sinn", "Ninn", "Iinn", "Tinn", "Sout", "Nout", "Iout", "Tout"),
+        lab_x = c(0,0,2,0,-2,0,4,0,-4),
+        lab_y = c(0,2,0,-2,0,4,0,-4,0)
+      )
+      
+      
+      plot <- ggplot(datapoly, aes(x = x, y = y)) +
+        geom_polygon(aes(fill = value, group = zone_num))+
+        theme_void()+
+        ggtitle(paste(pattern_df$label[i], "mean value mapped to right eye ETDRS grid"))+
+        geom_text(data = shape_labels, aes(x = lab_x, y = lab_y, label = label), size = 4)
+        
+        
+      # plot shapes, same scale for non mt plots
+      if(patts[i] %in% c("cirrus_MT.*\\d$", "stratus_MT.*\\d$", "spectralis_MT0\\d$")){
+         plot <- plot + 
+                  scale_fill_viridis(begin = 0, end = 1)
+         
+      }else (
+       plot <- plot+
+         scale_fill_viridis(begin = 0, end = 1)
+                  # scale_fill_viridis(begin = 1, end = 0, limits = c(0, 2))
+      )
+      
+       plots[[i]] <-ggplotGrob(plot)
+}
+
+
+
+# make grid and save 
+etdrs_grid <- gridExtra::marrangeGrob(grobs = plots, nrow = 5, ncol = 2)
+ggsave(paste0(wd_path,"results/etdrs_grid.png") , etdrs_grid, width = 15, height = 15, dpi = 200)
+
+```
+
+
+<!-- # heatmap of phenotype x zone -->
+<!-- ```{r} -->
+<!-- pheno_cases <- data.frame() -->
+<!-- for (item in summ_dfs){ -->
+<!--  name <- item[1]$name -->
+<!--  df <- item[[2]] -->
+<!--  df_t <- df[,2] %>% t() -->
+<!--  rownames(df_t) <- name -->
+<!--  colnames(df_t) <- df$zone_num -->
+<!--   pheno_cases <- pheno_cases %>% rbind(., df_t) -->
+<!-- } -->
+
+<!-- pheno_m_cases <- pheno_cases %>% as.matrix()  -->
+
+<!-- heatmap(pheno_m_cases, scale = "row", main = "Average values for each zone and phenotype") -->
+
+<!-- #~/Documents/LMRI/PRJ2024001/version015/results/area_phenotype_heatmap.png -->
+<!-- ``` -->
+
+
+# save data
+```{r}
+new_data_name <- data_name %>% 
+  gsub("3", "4", .)
+print(paste("Saving...", new_data_name))
+saveRDS(d, paste0(wd_path,"processed_data/", new_data_name))
+```
+CF_FFA_DEM_DIAGNOSIS_ENRNHOR_ENRNHOS_FAFGRADE_FAMSTATUS_MH_OCTMAIN_OCTMTCIRRUS_OCTMTSPECTRALIS_OCTMTSTRATUS_VAA_lea_04.rds
+
+# save info
+NOT EDITED
+```{r}
+write.xlsx(info, paste0(wd_path,"processed_data/database_grading_key_03.xlsx"))
+```
+
+```{r}
+sum(is.na(d$LRT05)) # 27198 >  24547 26-3-2024 >> 1302 23-4-2024 >> 297 20-5-2024 >> 961 24-5-2024 >> 348  13-3-2025
+```
+
+```{r, look at dims}
+check_dims()
+
+# dims : 12600 288
+#                      [,1]
+# n_patIDs             3693
+# n_patID_eyes         7386
+# n_observations      12600
+# n_patIDs_w_gr_1_vis   516
+
+
+### MARCH 13 2025 ###
+# dims : 12619 289
+# n_patIDs             4034
+# n_patID_eyes         8063
+# n_observations      12617
+# n_patIDs_w_gr_1_vis   500
+
+```
+
+
+<!-- ```{r} -->
+
+<!-- X <- d %>%  -->
+<!--   mutate_all(as_numeric_if_possible) %>%  -->
+<!--   select(where(is.numeric), matches("DM|SMK|OTHER|CONF|WGT|HGT"), -patientId)  -->
+
+<!-- X <- X %>%  -->
+<!--   fastDummies::dummy_cols( names(X)[sapply(X, is.character)],remove_first_dummy = FALSE)%>% -->
+<!--   select(where(is.numeric)) -->
+
+<!-- corr <-vapply(X, function(x) { -->
+<!--   if (is.numeric(x)) { -->
+<!--     cor(X$confounding_disease, x, use = "complete.obs") -->
+<!--   } else { -->
+<!--     NA_real_ -->
+<!--   } -->
+<!-- }, numeric(1))  -->
+<!-- corr <- corr[!is.na(corr)] -->
+<!-- corr <- as.matrix(corr) -->
+
+<!-- colnames(corr) <- "confounding_disease" -->
+
+<!-- Heatmap(t(corr), cluster_rows = F, cluster_columns = TRUE) -->
+
+<!-- x <- X$confounding_disease  # Reference vector -->
+<!-- dists <- apply(X, 2, function(y) { -->
+<!--   if (is.numeric(y)) sqrt(sum((x - y)^2, na.rm = TRUE)) else NA_real_ -->
+<!-- }) -->
+
+<!-- as.matrix(dists) %>%  -->
+<!--   {1/sqrt(.+1)} %>%  -->
+<!--   t() %>%  -->
+<!--   Heatmap(col = plasma(100)) -->
+
+<!-- X %>%  -->
+<!--   drop_na() %>%  -->
+<!--   nrow() -->
+
+<!-- mdpatt <- md.pattern(X, plot = FALSE) -->
+
+<!-- nrow(X) -->
+<!-- mdpatt[nrow(mdpatt), 1:ncol(X) ] %>% sort() -->
+
+<!-- fa <- psych::fac(X, nfactors = 10, rotate = "oblimin") -->
+
+<!-- ``` -->
+

@@ -1,0 +1,3486 @@
+---
+title: "08_functionAndStructureModeling"
+author: "Christian Anderson"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# options
+```{r}
+cat("\nRUNNING 10_function_structuere_modeling\n\n")
+# dev.off()  # Turn off the current graphics device
+# options(device = "RStudioGD")
+# quartz()
+```
+
+
+# Packages
+```{r, message=FALSE, warning=FALSE, results='hide', echo = TRUE}
+
+pacman::p_load(tidyr,dplyr,reshape2,purrr,GGally,tidyverse,ggpubr,vcd,UpSetR,ggplot2,gridExtra,ComplexHeatmap,viridis,knitr,htmlwidgets,zoo,corrplot,RColorBrewer,openxlsx,plotly,RColorBrewer,mgcv,zoo,tools,mice,grDevices,ggrepel,networkD3,htmltools,grid,gplots,Metrics,psych,car,stats,lme4,lmerTest,VennDiagram,ape,SingleCellExperiment,parallel, HDF5Array)
+
+
+
+rm(list = ls())
+gc()
+```
+
+# functions
+```{r}
+source("/Users/canderson/Documents/LMRI/PRJ2024001/version015/analysis/00_MyFunctions.R")
+
+```
+
+
+# Load Data
+info and d from sce
+```{r, message=FALSE, warning=FALSE, results='hide', echo = TRUE}
+
+wd_path = "~/Documents/LMRI/PRJ2024001/version015/"
+
+# load experiment
+sce <-  HDF5Array::loadHDF5SummarizedExperiment(sprintf("%sprocessed_data/sce002.2.h5", wd_path))
+
+raw <- metadata(sce)$raw
+
+```
+
+
+
+# make new directorys for plots
+```{r}
+
+path <- paste0(wd_path, "results/modeling/")
+if(!dir.exists(path)) {
+  dir.create(path, recursive = TRUE)
+  
+}
+
+
+VA_modeling_path <- paste0(wd_path, "results/modeling/VA/")
+if(!dir.exists(VA_modeling_path)) {
+  dir.create(VA_modeling_path, recursive = TRUE)
+  
+}
+
+MT_modeling_path <- paste0(wd_path, "results/modeling/MT/")
+if(!dir.exists(MT_modeling_path)) {
+  dir.create(MT_modeling_path, recursive = TRUE)
+  
+}
+
+```
+
+# clean data
+
+
+```{r, look at dims}
+
+check_dims <- function(){
+  
+  D <- as.data.frame(colData(sce)) %>% 
+  left_join(
+    as.data.frame(t(assays(sce)$scaled_measure_vars)) %>% 
+      rownames_to_column("sample")
+  ) 
+  
+  cat(paste0("\ndims : ", paste(dim(D), collapse = " "),"\n"))
+  
+  n_patIDs <- D %>% 
+    select(patID, visitID, eye_num) %>% 
+    drop_na() %>% 
+    pull(patID ) %>% 
+    n_distinct(na.rm = TRUE)
+  
+  n_patID_eyes <- D %>% 
+    select(patID, visitID, eye_num) %>% 
+    drop_na() %>% 
+    select(patID, eye_num) %>% 
+    n_distinct(na.rm = TRUE)
+  
+  n_observations <- D %>% 
+    select(patID, visitID, eye_num) %>% 
+    drop_na() %>% 
+    n_distinct(na.rm = TRUE)
+  
+  n_patIDs_w_gr_1_vis <- D %>% 
+    select(patID, visitID, eye_num) %>% 
+    drop_na() %>% 
+    filter(n()>1, .by = c(patID, eye_num)) %>% 
+    pull(patID) %>% 
+    n_distinct(na.rm = TRUE)
+  
+  print(rbind(n_patIDs,n_patID_eyes,n_observations,n_patIDs_w_gr_1_vis))
+  
+}
+
+check_dims()
+# dims : 12525 143
+#                      [,1]
+# n_patIDs             3675
+# n_patID_eyes         7328
+# n_observations      12525
+# n_patIDs_w_gr_1_vis   516
+# ^ no change
+
+### APRIL 2 2025 ###
+# dims : 12276 179
+# n_patIDs             3971
+# n_patID_eyes         7888
+# n_observations      12275
+# n_patIDs_w_gr_1_vis   492
+
+```
+
+## make year
+```{r}
+
+sce$year <- round(sce$month/12, 2)
+
+```
+
+
+## derive t2d from other DM vars
+```{r}
+
+#key of dm vars
+colData(sce)[, c("DM", "DMTYPE", 'DMTYPEAU')] %>% 
+  as.data.frame() %>% 
+  group_by(across(everything())) %>% 
+  summarize(count = n()) %>% 
+  ungroup() %>% 
+  arrange(count)
+#   DM    DMTYPE  DMTYPEAU count
+# 1 NA    NA      Type I       4
+# 2 Yes   NA      NA          18
+# 3 Yes   Type I  NA          28
+# 4 NA    NA      Type II    180
+# 5 Yes   Type II NA        1870
+# 6 No    NA      NA        4007
+# 7 NA    NA      NA        6169
+
+colData(sce)[, grep("DM", names(colData(sce)), value = TRUE)] %>%
+  as.matrix() %>% 
+  mice::md.pattern(rotate.names = T)
+
+# Start with NA
+sce$t2d <- NA_integer_
+
+# Set t2d = 1 if either field says Type II
+sce$t2d[which(sce$DMTYPE == "Type II" | sce$DMTYPEAU == "Type II")] <- 1
+
+# Set t2d = 0 if all available fields say no evidence of T2D and they are not missing
+sce$t2d[which(
+  (sce$DM == "No" & !is.na(sce$DM)) |
+  (sce$DMTYPE != "Type II" & !is.na(sce$DMTYPE)) |
+   (sce$DMTYPEAU != "Type II" & !is.na(sce$DMTYPEAU))
+)] <- 0
+
+table(sce$t2d, useNA = "always")
+#    0    1 <NA> 
+# 4039 2050 6187 
+
+```
+
+
+## filter relations to proband
+- if probandfamily/solo keep
+- if family solo with mactel keep
+```{r}
+
+
+
+# make one relatproband var in da
+relatprobnd <- data.frame(colData(sce)) %>% 
+  select(NHOS_RELATPROBND,NHOR_RELATPROBND) %>% 
+  mutate_all( ~ifelse(grepl("\\d+", .), NA, .))%>% 
+  mutate(RELATPROBND = coalesce(.[[1]] , .[[2]]))
+
+colData(sce)$RELATPROBND <-relatprobnd$RELATPROBND
+
+d <- assays(sce)$pmm_imp_of_scaled %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column("sample") %>% 
+  left_join( colData(sce) %>% data.frame())
+
+family_vars <- c("patID", "FAMILY_ID","FAMILY_STATUS", "RELATPROBND")
+d$FAMILY_STATUS %>% table()
+d$FAMILY_ID %>% table()
+d$RELATPROBND %>% table()
+
+
+# fill relation with familystatus where relation is missing
+d$RELATPROBND[d$FAMILY_STATUS == "familyMember" & is.na(d$RELATPROBND)] <- "non-specified family"
+
+d$RELATPROBND[is.na(d$FAMILY_STATUS) ] # relation missing where family status missing
+
+# make logic for rows with proband
+d$is.proband <- ifelse(d$FAMILY_STATUS %in% c("probandSolo", "probandWithFamily"), TRUE, FALSE)
+
+# where proband, what is the relationshiop?
+d$RELATPROBND[d$is.proband] %>% table()
+# 3  Brother Daughter   Father   Mother   Sister are relationships when there should be none (assumedly) << only "3" when filtering out the NHOS pats
+
+# make relation NA where is.proband because, e.g., brother of self?
+d$RELATPROBND[d$is.proband] <- NA
+
+# what patients are there where not proband and not a part of a proband's family
+proband_familes <- d$FAMILY_ID[d$is.proband]
+probandless_families <- setdiff(d$FAMILY_ID, proband_familes)
+
+pseudo_probands <- d[d$FAMILY_ID %in% probandless_families , family_vars] %>% unique()
+# ^ these relations do not have a proband to be related to
+
+# family that shows up >1 times
+frequent_probandless_family <- table(pseudo_probands$FAMILY_ID)[table(pseudo_probands$FAMILY_ID) > 1] %>% names()
+
+# U77-MURPHY shows up 3 times, what's the deal?
+d[d$FAMILY_ID%in%frequent_probandless_family , ] %>% glimpse
+frequent_probandless_family_patients <- d$patID[d$FAMILY_ID%in%frequent_probandless_family ] %>% 
+  unique()
+# ^ three patients in this family and no proband
+
+# which of these patients has most data and visits?
+d %>% 
+  filter(patID %in% frequent_probandless_family_patients) %>% 
+  group_by(patID_eye) %>% 
+  summarize(n_vis = n_distinct(visitID))
+# ^ all have one visit
+
+# sum of numeric variables
+pat_colsums <- sapply(frequent_probandless_family_patients, function(pat){
+    d %>% 
+      filter(patID == pat) %>%
+      select(which(sapply(d, is.numeric))) %>% 
+      colSums(., na.rm = TRUE)
+  
+}) %>% 
+  as.data.frame
+
+# which pat has largest sum (worst disease)
+best_pat <- names(pat_colsums)[colSums(pat_colsums)==max(colSums(pat_colsums))] #  025098 U77-MURPHY    familyMember  Brother   
+
+# make pseudo_probands excluding frequentprobandlessfamily - best_pat ( is best pat or is not frequent family)
+patients_to_proband <- pseudo_probands$patID[pseudo_probands$patID == best_pat | pseudo_probands$FAMILY_ID != frequent_probandless_family ]
+
+d$is.proband[d$patID %in% patients_to_proband] <-  TRUE
+
+# how many non-probands? any missing?
+table(d$is.proband)
+# FALSE  TRUE << filtering out NHOS pats
+#    86  5506 
+# FALSE  TRUE 
+#   596 11680 
+
+# remove non-proband patients
+d <- d[d$is.proband, ] 
+
+```
+
+## Make VA rates
+```{r}
+
+# difference from first over difference in time, ignoring NAs in . and month
+d <- d %>% 
+  group_by(patID_eye) %>% 
+  arrange(month) %>% 
+  mutate(across(matches("FA\\d$|FA_mean$|ACUIT|LOGMAR|SNELL"), ~{
+    (dplyr::last(.[!is.na(.)])-dplyr::first(.[!is.na(.)]))/
+      (dplyr::last(month[!is.na(.)])-dplyr::first(month[!is.na(.)]))
+    }, 
+    .names = "{.col}_rate"
+    )
+  )
+
+
+```
+
+## remove FA vars
+```{r}
+
+colData(sce)[ ,  grep("FA_|FA\\d", names(colData(sce))) ] <- NULL
+
+```
+
+
+## Make MT.rates
+```{r}
+
+names(d) %>% grep("MT0|parafovea", ., value = TRUE)
+
+d <- d %>% 
+  group_by(patID_eye) %>% 
+  arrange(month) %>% 
+  mutate(across(matches("MT0|parafovea"), ~{
+    (dplyr::last(.)-dplyr::first(.))/
+      (dplyr::last(month)-dplyr::first(month))
+    }, 
+    .names = "{.col}_rate"
+    )
+  )
+
+
+```
+
+
+# _______________________
+# what phenotypes to model?
+*ensure numeric
+```{r}
+
+phenotypes <-  c(rownames(sce), grep("SNELL|ACUIT|LOGMAR|chew_grade_derived_mine_loose|RW|disease|t2d|SMKCIGSDAY|WGTKG", names(colData(sce)) , value = TRUE, ignore.case = TRUE))
+
+# make phenotypes numeric in d
+d <- d %>% 
+  mutate(across(all_of(phenotypes),
+                ~ as.numeric(.)))
+
+# remove skewed vars
+bp <- abs(sapply(d[, phenotypes], skew)) %>% 
+  sort() %>% 
+  boxplot()
+
+cat("\n")
+cat(paste(names(bp$out), collapse = ", "))
+# HRDEXUDATE, RW144, RAV01, YELLOWRND, ICL03, RAV04, ICL01, RPE_LK06, ICL04
+
+phenotypes <- phenotypes[!phenotypes %in% names(bp$out)]
+
+```
+
+
+<!-- #__  ___   ___   __ -->
+<!-- # modeling vision loss -->
+<!-- # *** -->
+
+<!-- #$$ -->
+<!-- # * raw values -->
+<!-- ## VA_mean -->
+<!-- #### subset data to scale and model -->
+<!-- * filter out the ones with (rows>0) < 30 -->
+<!-- ```{r} -->
+
+
+<!-- # #  variables (rows of value>0) < 30 where FA_mean present -->
+<!-- # m <- d[!is.na(d$FA_mean),phenotypes] != 0 -->
+<!-- # vars <- m %>% -->
+<!-- #   colSums(., na.rm = TRUE)  -->
+<!-- #  -->
+<!-- # # variables with > 30 obs of value>0  -->
+<!-- # deviant_vars <- vars[vars > 30] %>% names() -->
+<!-- #  -->
+<!-- # # how many unique months do these have where FA_mean and var available? -->
+<!-- # count_unq_months <-  sapply(deviant_vars, function(x){  -->
+<!-- #                     # how many unique months where both FA and var available? -->
+<!-- #                     return( d $month[!is.na(d$FA_mean) & !is.na(d[,x])] %>%  -->
+<!-- #                              unique() %>% -->
+<!-- #                              length() -->
+<!-- #                             ) -->
+<!-- #                   }) -->
+<!-- #  -->
+<!-- # # vars with greater than one unique month observed  -->
+<!-- # VA_mean_greater_than_one_month <- count_unq_months[count_unq_months>1] %>%  -->
+<!-- #   names() -->
+
+<!-- # setdiff(deviant_vars ,greater_than_one_month  ) # "BLRPATTERN"  "NOABNORMFAF" only have 1 month of observations where >30 records of rows of value > 0 -->
+
+<!-- # subset d with vars of interest  -->
+<!-- model_df <- d %>%  -->
+<!--   # select(month, patID_eye, patID, SEXF, all_of(VA_mean_greater_than_one_month)) -->
+<!--   select(month, patID_eye, patID, SEXF, all_of(phenotypes)) -->
+
+<!-- response <- 'FA_mean' -->
+<!-- # scale vars of interest -->
+<!-- model_df[, phenotypes[-which(phenotypes == response)]] <- scale( -->
+<!--   model_df[, phenotypes[-which(phenotypes == response)]] -->
+<!--   ) -->
+
+
+<!-- ``` -->
+
+
+<!-- <!-- ```{r, FDR exercise} --> -->
+<!-- <!-- # Rank p-values from smallest to largest. --> -->
+<!-- <!-- # Compare each p-value to an increasing threshold (i/m)α, where i is the rank, m is the total number of tests, and α is the desired FDR level. --> -->
+<!-- <!-- # Reject hypotheses for p-values below this threshold. --> -->
+<!-- <!-- a <- 0.05 --> -->
+<!-- <!-- set.seed(42) --> -->
+<!-- <!-- p_null <- runif(500)             # True nulls (uniform) --> -->
+<!-- <!-- p_alt <- rbeta(250, 0.5, 1)      # False nulls (skewed to 0) --> -->
+<!-- <!-- p_values <- sort(c(p_null, p_alt), decreasing = F) --> -->
+<!-- <!-- plot(density(p_values)) --> -->
+<!-- <!-- r <- rank(p_values) --> -->
+<!-- <!-- p_sim <- (r/length(r))*a --> -->
+<!-- <!-- plot(density(p_sim)) --> -->
+
+<!-- <!-- z <- data.frame(P = round(p_values,3), FDR = round(p_sim,3), Sig =  p_sim<=0.05) --> -->
+
+
+<!-- <!-- ``` --> -->
+
+<!-- #### model each variable against FA_mean, correcting for SEXF, and random effect eye and patient -->
+<!-- ```{r} -->
+
+<!-- # exclude the response variable, FA_mean and correction variables -->
+<!-- input_phenotypes <- names(model_df)[-which(names(model_df) %in%  -->
+<!--                                              c("FA_mean", "FA_mean_rate",  -->
+<!--                                                 "month","patID_eye","patID","SEXF"))  -->
+<!--                                     ] -->
+
+<!-- # for each variable in input_phenotypes, model FA_mean  -->
+<!-- formulas_char <- paste0(response," ~ ", input_phenotypes, " + SEXF + (1|patID_eye) + (1 | patID)")  -->
+
+<!-- results_list <- mclapply(formulas_char, function(form_char){ -->
+
+<!--   formula <- as.formula( form_char) -->
+
+<!--   fit <- try({ -->
+<!--           lmer(formula, data = model_df) -->
+<!--         }) -->
+<!--   if(inherits(fit, "try-error")){ -->
+<!--     warning(paste0("FAILURE!!!\n",form_char,"\n")) -->
+<!--   } -->
+
+<!--   return(summary(fit)) -->
+
+<!-- }, mc.cores = detectCores()-1) -->
+
+<!-- # simplify names to response and predictor (replace a space followed by a + with anything after with nothing) -->
+<!-- names(results_list) <- sub("\\s\\+.*", "",formulas_char) -->
+
+<!-- # filter out models that didnt work -->
+<!-- faulty_models <- sapply(results_list,function(x) all(class(x) %in% c("summaryDefault","table")) ) %>%  -->
+<!--   Filter(isTRUE,.) %>%  -->
+<!--   names() -->
+
+<!-- results_list <- results_list[!names(results_list) %in% faulty_models] -->
+
+<!-- # fill df with model values -->
+<!-- results_df <- extract_results(results_list) -->
+
+
+<!-- # filter control variables from results -->
+<!-- results_df <- results_df %>%  -->
+<!--   filter(!Term %in% c("(Intercept)", "SEXF", "month")) %>%  -->
+<!--   filter(q_value>0) -->
+
+
+<!-- results_df_filtered <- results_df %>%  -->
+<!--   filter(!Model %in% grep("MT|MT0|RW\\d+|FA\\d|SEX", results_df$Model, value = TRUE)) %>%  -->
+<!--   filter(!Model %in% c("mean_parafoveal_rates")) -->
+
+<!-- ### plot #### -->
+
+<!-- # volcano plot of vaa~phenotypes result -->
+<!-- VA_by_phenos_volcano <- ggplot(results_df, aes(x = Estimate, y = -log10(q_value), color = Term))+ -->
+<!--       geom_point(show.legend = FALSE)+ -->
+<!--       geom_label_repel(aes(label = ifelse( q_value <= .05,  Term, NA)), -->
+<!--                        size = 4, -->
+<!--                        nudge_y = 0.5,   -->
+<!--                        show.legend = FALSE,  -->
+<!--                        max.overlaps = 20)+ -->
+<!--       geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+ -->
+<!--       geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+ -->
+<!--       theme_bw()+ -->
+<!--       # facet_wrap(~quintile, scales = "fixed")+ -->
+<!--       ggtitle("VA_factor_mean ~ SEXF + phenotype_i + (1|patID_eye) + (1 | patID)") -->
+
+<!-- ggsave(paste0(VA_modeling_path, "VA_by_phenos_volcano.png"), VA_by_phenos_volcano, width = 20, height = 12, dpi = 200) -->
+
+
+<!-- # volcano plot of vaa~phenotypes result -->
+<!-- VA_by_phenos_volcano_filtered <- ggplot(results_df_filtered, aes(x = Estimate, y = -log10(q_value), color = Term))+ -->
+<!--       geom_point(show.legend = FALSE)+ -->
+<!--       geom_label_repel(aes(label = ifelse( q_value <= .05,  Term, NA)), -->
+<!--                        size = 4, -->
+<!--                        nudge_y = 0.5,   -->
+<!--                        show.legend = FALSE,  -->
+<!--                        max.overlaps = 20)+ -->
+<!--       geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+ -->
+<!--       geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+ -->
+<!--       theme_bw()+ -->
+<!--       # facet_wrap(~quintile, scales = "fixed")+ -->
+<!--       ggtitle("VA_factor_mean ~ SEXF + phenotype_i + (1|patID_eye) + (1 | patID)") -->
+
+<!-- ggsave(paste0(VA_modeling_path, "VA_by_phenos_volcano_filtered.png"), VA_by_phenos_volcano_filtered, width = 20, height = 12, dpi = 200) -->
+
+
+
+<!-- ``` -->
+
+<!-- ## FA1  -->
+
+<!-- #### subset data to scale and model -->
+<!-- * filter out the ones with (rows>0) < 30 -->
+<!-- ```{r} -->
+
+
+<!-- # #  variables (rows of value>0) < 30 where FA1 present -->
+<!-- # m <- d[!is.na(d$FA1),phenotypes] != 0 -->
+<!-- # vars <- m %>% -->
+<!-- #   colSums(., na.rm = TRUE)  -->
+<!-- #  -->
+<!-- # # variables with > 30 obs of value>0  -->
+<!-- # deviant_vars <- vars[vars > 30] %>% names() -->
+<!-- #  -->
+<!-- # # how many unique months do these have where FA1 and var available? -->
+<!-- # count_unq_months <-  sapply(deviant_vars, function(x){  -->
+<!-- #                     # how many unique months where both FA and var available? -->
+<!-- #                     return( d $month[!is.na(d$FA1) & !is.na(d[,x])] %>%  -->
+<!-- #                              unique() %>% -->
+<!-- #                              length() -->
+<!-- #                             ) -->
+<!-- #                   }) -->
+<!-- #  -->
+<!-- # # vars with greater than one unique month observed  -->
+<!-- # FA1_greater_than_one_month <- count_unq_months[count_unq_months>1] %>%  -->
+<!-- #   names() -->
+
+<!-- # setdiff(deviant_vars ,greater_than_one_month  ) # "BLRPATTERN"  "NOABNORMFAF" only have 1 month of observations where >30 records of rows of value > 0 -->
+
+<!-- # # subset d with vars of interest  -->
+<!-- # model_df <- d %>%  -->
+<!-- #   select(month, patID_eye, patID, SEXF, FA1, all_of(FA1_greater_than_one_month)) -->
+<!-- #  -->
+<!-- # # scale vars of interest -->
+<!-- # model_df[, FA1_greater_than_one_month] <- scale(model_df[, FA1_greater_than_one_month]) -->
+
+
+<!-- # subset d with vars of interest  -->
+<!-- response <- 'FA1' -->
+
+<!-- model_df <- d %>%  -->
+<!--   select(month, patID_eye, patID, SEXF, all_of(c(response,phenotypes))) -->
+
+<!-- # scale vars of interest -->
+<!-- model_df[, phenotypes[-which(phenotypes == response)]] <- scale( -->
+<!--   model_df[, phenotypes[-which(phenotypes == response)]]) -->
+
+<!-- ``` -->
+
+<!-- #### model FA1, correcting for SEXF, month, and random effect eye -->
+<!-- ```{r} -->
+
+<!-- # exclude the response variable, FA1 -->
+<!-- input_phenotypes <- names(model_df)[-which(names(model_df) %in% c("FA1", "FA1_rate", "month","patID_eye","patID","SEXF" ))] -->
+
+<!-- # for each variable in input_phenotypes, model FA1  -->
+<!-- formulas_char <- paste0(response," ~ ", input_phenotypes, " + SEXF + (1|patID_eye) + (1 | patID)")  -->
+
+<!-- # model parrallel -->
+<!-- results_list <- mclapply(formulas_char, function(form_char){ -->
+
+<!--   formula <- as.formula( form_char) -->
+
+<!--   fit <- try({ -->
+<!--           lmer(formula, data = model_df) -->
+<!--         }) -->
+<!--   if(inherits(fit, "try-error")){ -->
+<!--     warning(paste0("FAILURE!!!\n",form_char,"\n")) -->
+<!--   } -->
+
+<!--   return(summary(fit)) -->
+
+<!-- }, mc.cores = detectCores()-1) -->
+
+<!-- # simplify names to response and predictor (replace a space followed by a + with anything after with nothing) -->
+<!-- names(results_list) <- sub("\\s\\+.*", "",formulas_char) -->
+
+<!-- # filter out models that didnt work -->
+<!-- faulty_models <- map(results_list,function(x) all(class(x) %in% c("summaryDefault","table")) ) %>%  -->
+<!--   Filter(isTRUE,.) %>%  -->
+<!--   names() -->
+
+<!-- results_list <- results_list[!names(results_list)%in%faulty_models ] -->
+
+<!-- # fill df with model values -->
+<!-- results_df <- extract_results(results_list) -->
+
+<!-- # filter control variables from results -->
+<!-- results_df <- results_df %>%  -->
+<!--   filter(!Term %in% c("(Intercept)", "SEXF", "month")) -->
+
+<!-- # filter out unwanted variables -->
+<!-- results_df <- results_df %>%  -->
+<!--   filter(!Model %in% c("FA_mean")) -->
+
+<!-- results_df_filtered <- results_df %>%  -->
+<!--   filter(!Term %in% c(grep("MT|MT0|RW\\d|FA_m|FA\\d|SEX", results_df$Term, value =TRUE), "mean_parafoveal_rates" ) ) -->
+
+<!-- # volcano plot of vaa~phenotypes result -->
+<!-- FA1_by_phenos_volcano <- ggplot(results_df, aes(x = Estimate, y = -log10(q_value), color = Term))+ -->
+<!--       geom_point(show.legend = FALSE)+ -->
+<!--       geom_label_repel(aes(label = ifelse( q_value <= .05,  Term, NA)), -->
+<!--                        size = 4, -->
+<!--                        nudge_y = 0.5,   -->
+<!--                        show.legend = FALSE,  -->
+<!--                        max.overlaps = 20)+ -->
+<!--       geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+ -->
+<!--       geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+ -->
+<!--       theme_bw()+ -->
+<!--       # facet_wrap(~quintile, scales = "fixed")+ -->
+<!--       ggtitle("VA_factor_1 ~ SEXF + phenotype_i + (1|patID_eye) + (1 | patID)") -->
+
+<!-- ggsave(paste0( VA_modeling_path, "FA1_by_phenos_volcano.png"), FA1_by_phenos_volcano, width = 20, height = 12, dpi = 200) -->
+
+<!-- # volcano plot of vaa~phenotypes result -->
+<!-- FA1_by_phenos_volcano_filtered <- ggplot(results_df_filtered, aes(x = Estimate, y = -log10(q_value), color = Term))+ -->
+<!--       geom_point(show.legend = FALSE)+ -->
+<!--       geom_label_repel(aes(label = ifelse( q_value <= .05,  Term, NA)), -->
+<!--                        size = 4, -->
+<!--                        nudge_y = 0.5,   -->
+<!--                        show.legend = FALSE,  -->
+<!--                        max.overlaps = 20)+ -->
+<!--       geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+ -->
+<!--       geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+ -->
+<!--       theme_bw()+ -->
+<!--       # facet_wrap(~quintile, scales = "fixed")+ -->
+<!--       ggtitle("VA_factor_1 ~ SEXF + phenotype_i + (1|patID_eye) + (1 | patID)") -->
+
+<!-- ggsave(paste0(VA_modeling_path, "FA1_by_phenos_volcano_filtered.png"), FA1_by_phenos_volcano_filtered, width = 20, height = 12, dpi = 200) -->
+
+<!-- ``` -->
+
+
+<!-- ## FA2 -->
+
+<!-- #### subset data to scale and model -->
+<!-- * filter out the ones with (rows>0) < 30 -->
+<!-- ```{r} -->
+
+<!-- #  -->
+<!-- # #  variables (rows of value>0) < 30 where FA2 present -->
+<!-- # m <- d[!is.na(d$FA2),phenotypes] != 0 -->
+<!-- # vars <- m %>% -->
+<!-- #   colSums(., na.rm = TRUE)  -->
+<!-- #  -->
+<!-- # # variables with > 30 obs of value>0  -->
+<!-- # deviant_vars <- vars[vars > 30] %>% names() -->
+<!-- #  -->
+<!-- # # how many unique months do these have where FA2 and var available? -->
+<!-- # count_unq_months <-  sapply(deviant_vars, function(x){  -->
+<!-- #                     # how many unique months where both FA and var available? -->
+<!-- #                     return( d $month[!is.na(d$FA2) & !is.na(d[,x])] %>%  -->
+<!-- #                              unique() %>% -->
+<!-- #                              length() -->
+<!-- #                             ) -->
+<!-- #                   }) -->
+<!-- #  -->
+<!-- # # vars with greater than one unique month observed  -->
+<!-- # FA2_greater_than_one_month <- count_unq_months[count_unq_months>1] %>%  -->
+<!-- #   names() -->
+
+<!-- # setdiff(deviant_vars ,greater_than_one_month  ) # "BLRPATTERN"  "NOABNORMFAF" only have 1 month of observations where >30 records of rows of value > 0 -->
+
+<!-- # # subset d with vars of interest  -->
+<!-- # model_df <- d %>%  -->
+<!-- #   select(month, patID_eye, patID, SEXF, FA2, all_of(FA2_greater_than_one_month)) -->
+<!-- #  -->
+<!-- # # scale vars of interest -->
+<!-- # model_df[, FA2_greater_than_one_month] <- scale(model_df[, FA2_greater_than_one_month]) -->
+
+<!-- # subset d with vars of interest  -->
+<!-- response <- 'FA2' -->
+
+<!-- model_df <- d %>%  -->
+<!--   select(month, patID_eye, patID, SEXF, all_of(c(response,phenotypes))) -->
+
+<!-- # scale vars of interest -->
+<!-- model_df[, phenotypes[-which(phenotypes == response)]] <- scale( -->
+<!--   model_df[, phenotypes[-which(phenotypes == response)]]) -->
+
+<!-- ``` -->
+
+<!-- #### model FA2, correcting for SEXF, month, and random effect eye -->
+<!-- ```{r} -->
+
+<!-- # exclude the response variable, FA2 -->
+<!-- input_phenotypes <- names(model_df)[-which(names(model_df) %in% c("FA2", "FA2_rate", "month","patID_eye","patID","SEXF" ))] -->
+
+<!-- # for each variable in input_phenotypes, model FA1  -->
+<!-- formulas_char <- paste0(response," ~ ", input_phenotypes, " + SEXF + (1|patID_eye) + (1 | patID)")  -->
+
+<!-- # model parrallel -->
+<!-- results_list <- mclapply(formulas_char, function(form_char){ -->
+
+<!--   formula <- as.formula( form_char) -->
+
+<!--   fit <- try({ -->
+<!--           lmer(formula, data = model_df) -->
+<!--         }) -->
+<!--   if(inherits(fit, "try-error")){ -->
+<!--     warning(paste0("FAILURE!!!\n",form_char,"\n")) -->
+<!--   } -->
+
+<!--   return(summary(fit)) -->
+
+<!-- }, mc.cores = detectCores()-1) -->
+
+<!-- # simplify names to response and predictor (replace a space followed by a + with anything after with nothing) -->
+<!-- names(results_list) <- sub("\\s\\+.*", "",formulas_char) -->
+
+<!-- # filter out models that didnt work -->
+<!-- faulty_models <- map(results_list,function(x) all(class(x) %in% c("summaryDefault","table")) ) %>%  -->
+<!--   Filter(isTRUE,.) %>%  -->
+<!--   names() -->
+
+<!-- results_list <- results_list[!names(results_list)%in%faulty_models ] -->
+
+<!-- # fill df with model values -->
+<!-- results_df <- extract_results(results_list) -->
+
+<!-- # filter correction terms from results -->
+<!-- results_df <- results_df %>%  -->
+<!--   filter(!Term %in% c("(Intercept)", "SEXF", "month")) -->
+
+<!-- # filter out unwanted variables -->
+<!-- results_df <- results_df %>%  -->
+<!--   filter(!Model %in% c("FA_mean")) -->
+
+<!-- results_df_filtered <- results_df %>%  -->
+<!--   filter(!Term %in% c(grep("MT|MT0|RW\\d|FA_m|FA\\d|SEX", results_df$Term, value =TRUE), "mean_parafoveal_rates" ) ) -->
+
+<!-- # volcano plot of vaa~phenotypes result -->
+<!-- FA2_by_phenos_volcano <- ggplot(results_df, aes(x = Estimate, y = -log10(q_value), color = Term))+ -->
+<!--       geom_point(show.legend = FALSE)+ -->
+<!--       geom_label_repel(aes(label = ifelse( q_value <= .05,  Term, NA)), -->
+<!--                        size = 4, -->
+<!--                        nudge_y = 0.5,   -->
+<!--                        show.legend = FALSE,  -->
+<!--                        max.overlaps = 20)+ -->
+<!--       geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+ -->
+<!--       geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+ -->
+<!--       theme_bw()+ -->
+<!--       # facet_wrap(~quintile, scales = "fixed")+ -->
+<!--       ggtitle("VA_factor_2 ~ SEXF + phenotype_i + (1|patID_eye) + (1 | patID)") -->
+
+<!-- ggsave(paste0( VA_modeling_path, "FA2_by_phenos_volcano.png"), FA2_by_phenos_volcano, width = 20, height = 12, dpi = 200) -->
+
+<!-- # volcano plot of vaa~phenotypes result -->
+<!-- FA2_by_phenos_volcano_filtered <- ggplot(results_df_filtered, aes(x = Estimate, y = -log10(q_value), color = Term))+ -->
+<!--       geom_point(show.legend = FALSE)+ -->
+<!--       geom_label_repel(aes(label = ifelse( q_value <= .05,  Term, NA)), -->
+<!--                        size = 4, -->
+<!--                        nudge_y = 0.5,   -->
+<!--                        show.legend = FALSE,  -->
+<!--                        max.overlaps = 20)+ -->
+<!--       geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+ -->
+<!--       geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+ -->
+<!--       theme_bw()+ -->
+<!--       # facet_wrap(~quintile, scales = "fixed")+ -->
+<!--       ggtitle("VA_factor_2 ~ SEXF + phenotype_i + (1|patID_eye) + (1 | patID)") -->
+
+<!-- ggsave(paste0(VA_modeling_path, "FA2_by_phenos_volcano_filtered.png"), FA2_by_phenos_volcano_filtered, width = 20, height = 12, dpi = 200) -->
+
+<!-- ``` -->
+
+
+
+<!-- #$$ -->
+<!-- # * Rate -->
+<!-- ## Corrplot of betas for VA rate models #### -->
+<!-- run all models for each factor rate  -->
+<!-- ### Subset data for modeling #### -->
+<!-- ```{r} -->
+
+<!-- factor_rate_vars <- grep("FA.*_rate", names(d), value = TRUE) -->
+
+<!-- # subset d with vars of interest  -->
+<!-- model_df <- d %>%  -->
+<!--   select(month, patID_eye, patID, SEXF,  all_of(factor_rate_vars), all_of(phenotypes)) -->
+
+<!-- # scale vars of interest, except responses: FA_mean, FA1:4 -->
+<!-- model_df[, phenotypes[-which(phenotypes%in%factor_rate_vars)] ] <- scale(model_df[, phenotypes[-which(phenotypes%in%factor_rate_vars)]]) -->
+
+<!-- # reduce model_df to patient's rate and first_visit phenotype value -->
+<!-- ## for fa, grab first non na  -->
+<!-- model_df_first <- model_df %>%  -->
+<!--   arrange(patID_eye, month) %>%   -->
+<!--   group_by(patID_eye) %>% -->
+<!--   mutate(across( -->
+<!--     !matches("FA"),  -->
+<!--     ~dplyr::first(.), -->
+<!--     .names  = "first_{.col}" -->
+<!--     )) %>% -->
+<!--   mutate(across( -->
+<!--     matches("FA"),  -->
+<!--     ~dplyr::first(.[!is.na(.)]), -->
+<!--     .names  = "first_{.col}" -->
+<!--     )) %>%  -->
+<!--   ungroup() -->
+
+<!-- # filter out non firsts and firsts that don't make sense, only unique rows -->
+<!-- model_df_first_filtered_unique <- model_df_first %>%  -->
+<!--   select( patID_eye, patID, SEXF, starts_with("first")) %>%    -->
+<!--   select(!all_of(c("first_month", "first_patID", "first_SEXF"))) %>% -->
+<!--   distinct() -->
+
+<!-- ``` -->
+
+
+<!-- ### Model #### -->
+<!-- ```{r} -->
+
+<!-- # for each rate , for each phenotype, model rate by that phenotype and add to main results_df -->
+<!-- ## vars modeled -->
+<!-- pred_vars <- paste("first", phenotypes, sep = "_") -->
+<!-- response_vars <- paste("first", factor_rate_vars, sep = "_") -->
+
+<!-- # loop through rates, except mean, and then model vars -->
+<!-- for(response_var in response_vars){ -->
+
+
+<!--   cat(paste("\n***\n", toupper(response_var), "\n***\n\n")) -->
+
+<!--   form_strs <- paste0(response_var, " ~ ",pred_vars," + SEXF + (1|patID)" ) -->
+
+<!--   # model -->
+<!--   a_rates_summaries <- mclapply(form_strs, function (form_str){ -->
+<!--       # make formula -->
+<!--       a_formula <- form_str %>%  -->
+<!--         as.formula() -->
+<!--       # model and summarize -->
+<!--       a_mod <- try({ -->
+<!--         lmer(a_formula, data = model_df_first_filtered_unique) -->
+<!--       }) -->
+<!--       return(summary(a_mod)) -->
+<!--    }, mc.cores = detectCores()-1) -->
+
+<!--   names(a_rates_summaries) <- sub("\\s\\+.*", "", form_strs) -->
+
+<!--   # where no error with model -->
+<!--   functioning_models<-  map(a_rates_summaries, function(x) !all(class(x) %in% c("summaryDefault", "table"))) %>%  -->
+<!--     unlist() -->
+<!--   a_rates_summaries <- a_rates_summaries[functioning_models] -->
+
+<!--   # make results df -->
+<!--   a_results <- extract_results(a_rates_summaries) -->
+
+<!--   # for first loop make empty results df -->
+<!--   if(response_var == response_vars[[1]]) results_df <- a_results[0,] -->
+
+<!--   results_df <- rbind(results_df, a_results) -->
+<!-- } -->
+
+<!-- ### Filter results and format data #### -->
+
+<!-- # filter out intercepts and correcting terms -->
+<!-- results_df <- results_df %>% -->
+<!--   filter(!str_detect(Term, "Intercept|SEXF")) -->
+
+
+<!-- # pivot data so rate vars are cols with estimates and models as rows -->
+<!-- estimates_rates_d <- results_df %>%  -->
+<!--   select(Response, Term, Estimate, q_value) -->
+
+<!-- # widen data each rate col = estimates for each model -->
+<!-- rate_estimates_d <- estimates_rates_d %>% -->
+<!--   pivot_wider(names_from = Response, values_from = Estimate,  -->
+<!--               id_cols = Term, values_fn = list(Estimate = dplyr::first)) -->
+
+<!-- # rate_qvals_d <- estimates_rates_d %>% -->
+<!-- #   pivot_wider(names_from = Response, values_from = q_value,  -->
+<!-- #               id_cols = Model, values_fn = list(q_value = dplyr::last)) -->
+<!-- ``` -->
+
+
+<!-- ### Plot betas  -->
+<!-- ```{r} -->
+
+<!-- # plot raw values of betas -->
+<!-- rate_estimates_matrix <- rate_estimates_d %>% -->
+<!--   column_to_rownames("Term") %>% -->
+<!--   as.matrix()  %>%  -->
+<!--   t() -->
+
+<!-- pdf(paste0(VA_modeling_path, "factor_rate_model_betas_heatmap.pdf"), width = 20, height = 10) -->
+<!-- Heatmap(rate_estimates_matrix ,  -->
+<!--         na_col = "black", -->
+<!--         column_title = "Factor rate model betas",  -->
+<!--         column_title_gp = gpar(fontsize = 20), -->
+<!--         column_dend_height = unit(30, "mm"), -->
+<!--         row_dend_width = unit(30, "mm"), -->
+<!--         cluster_rows = hclust(dist(rate_estimates_matrix), method = "ward.D2"), -->
+<!--         cluster_columns = hclust(dist(t(rate_estimates_matrix)), method = "ward.D2") -->
+<!--         # cell_fun = function(j, i, x, y, width, height, fill) { -->
+<!--         #               grid.text(text_annotations[i, j], x, y) -->
+<!--         #       } -->
+<!-- ) -->
+<!-- dev.off() -->
+
+<!-- # plot correlaation between betas -->
+<!-- rate_estimates_cor <- cor(rate_estimates_d[, -1]) -->
+<!-- pdf(paste0(VA_modeling_path, "factor_rate_betas_cor_heatmap.pdf"), width = 10, height = 8) -->
+<!-- Heatmap(rate_estimates_cor,  -->
+<!--         na_col = "black", -->
+<!--         col =  plasma(5), -->
+<!--         column_title = "Correlation of factor rate model betas",  -->
+<!--         column_title_gp = gpar(fontsize = 20), -->
+<!--         column_dend_height = unit(30, "mm"), -->
+<!--         row_dend_width = unit(30, "mm"), -->
+<!--         clustering_method_columns = "ward.D2" -->
+<!--         ) -->
+<!-- dev.off() -->
+
+
+<!-- # par(mfrow = c( 2,1)) -->
+<!-- # plot(type = "fan", as.phylo(hclust(dist(t(rate_estimates_matrix), ), method = "ward.D2"))) -->
+<!-- # plot(type = "fan", as.phylo(hclust(dist(rate_estimates_matrix, ), method = "ward.D2"))) -->
+<!-- # # plot(hclust(dist(rate_estimates_matrix), method = "ward.D2")) -->
+<!-- # # plot(hclust(dist(t(rate_estimates_matrix), ), method = "ward.D2")) -->
+<!-- # par(mfrow = c(1, 1)) -->
+
+
+
+
+<!-- # ### plot q_values #### -->
+<!-- # # plot correlations between q-vals -->
+<!-- # rate_q_value_cor <- cor(rate_qvals_d[, -1]) -->
+<!-- # pdf(paste0(wd_path, "results/VAA_analysis/factor_rate_qVals_cor_heatmap.pdf"), width = 10, height = 8) -->
+<!-- # Heatmap(rate_q_value_cor,  -->
+<!-- #         na_col = "black", -->
+<!-- #         column_title = "Correlations between q-values in modeling for different factor rates",  -->
+<!-- #         column_title_gp = gpar(fontsize = 20), -->
+<!-- #         column_dend_height = unit(30, "mm"), -->
+<!-- #         row_dend_width = unit(30, "mm") -->
+<!-- #         ) -->
+<!-- # dev.off() -->
+<!-- #  -->
+<!-- # # plot raw values of q_values -->
+<!-- # pdf(paste0(wd_path, "results/VAA_analysis/factor_rate_model_qVals_heatmap.pdf"), width = 20, height = 10) -->
+<!-- # Heatmap(rate_qvals_d %>% column_to_rownames("Model") %>%  mutate_all(~-log10(.)) %>% as.matrix() %>% t(), -->
+<!-- #         na_col = "black", -->
+<!-- #         column_title = "-log10 q-value of models for different factor rates", -->
+<!-- #         column_title_gp = gpar(fontsize = 20), -->
+<!-- #         column_dend_height = unit(30, "mm"), -->
+<!-- #         row_dend_width = unit(30, "mm") -->
+<!-- #     ) -->
+<!-- # dev.off() -->
+
+
+<!-- ``` -->
+
+
+<!-- ## Mean Acuity rate by phenotypes -->
+
+<!-- #### subset data to scale and model -->
+<!-- * filter out the ones with (rows>0) < 30 -->
+<!-- ```{r} -->
+<!-- # #  variables (rows of value>0) < 30 where FA_mean_rate present -->
+<!-- # m <- d[!is.na(d$FA_mean_rate),phenotypes] != 0 -->
+<!-- # vars <- m %>% -->
+<!-- #   colSums(., na.rm = TRUE)  -->
+<!-- #  -->
+<!-- # # variables with > 30 obs of value>0  -->
+<!-- # deviant_vars <- vars[vars > 30] %>% names() -->
+<!-- #  -->
+<!-- # # how many unique months do these have where FA_mean_rate and var available? -->
+<!-- # count_unq_months <-  sapply(deviant_vars, function(x){  -->
+<!-- #                     # how many unique months where both FA and var available? -->
+<!-- #                     return( d $month[!is.na(d$FA_mean_rate) & !is.na(d[,x])] %>%  -->
+<!-- #                              unique() %>% -->
+<!-- #                              length() -->
+<!-- #                             ) -->
+<!-- #                   }) -->
+<!-- # # vars with greater than one unique month observed  -->
+<!-- # VA_mean_rate_greater_than_one_month <- count_unq_months[count_unq_months>1] %>%  -->
+<!-- #   names() -->
+<!-- #  -->
+<!-- # VA_mean_rate_greater_than_one_month <- c(VA_mean_rate_greater_than_one_month, "FA_mean_rate") -->
+
+<!-- # setdiff(deviant_vars ,greater_than_one_month  ) # "BLRPATTERN"  "NOABNORMFAF" only have 1 month of observations where >30 records of rows of value > 0 -->
+
+<!-- # # subset d with vars of interest  -->
+<!-- # model_df <- d %>%  -->
+<!-- #   select(month, patID_eye, patID, SEXF, all_of(VA_mean_rate_greater_than_one_month)) -->
+<!-- #  -->
+<!-- # # scale vars of interest -->
+<!-- # model_df[, VA_mean_rate_greater_than_one_month] <- scale(model_df[, VA_mean_rate_greater_than_one_month]) -->
+
+
+<!-- response =  "FA_mean_rate" -->
+<!-- # subset d with vars of interest  -->
+<!-- model_df <- d %>%  -->
+<!--   select(month, patID_eye, patID, SEXF, all_of(c(response,phenotypes))) -->
+
+<!-- # scale vars of interest, minus response: FA_mean_rate -->
+<!-- model_df[, phenotypes[phenotypes!=response]] <- scale(model_df[, phenotypes[phenotypes!=response] ]) -->
+
+<!-- # # are any first values NA? -->
+<!-- # first_NA <- d %>% -->
+<!-- #   filter(!is.na(eye_num)) %>%  -->
+<!-- #   arrange(month) %>% -->
+<!-- #   group_by(patID_eye) %>%  -->
+<!-- #   select(month, patID_eye, all_of(VA_mean_greater_than_one_month)) %>% -->
+<!-- #   filter(if_any(everything(), ~is.na(dplyr::first(.)) )) %>%  -->
+<!-- #   ungroup() -->
+<!-- #  -->
+<!-- # first_NA %>% arrange(patID_eye) -->
+<!-- # # ^ YES!  -->
+
+<!-- ## reduce model_df to patient's rate and first_visit phenotype value. -->
+<!-- # model_df_first <- model_df %>%  -->
+<!-- #   arrange(month) %>%   -->
+<!-- #   group_by(patID_eye) %>% -->
+<!-- #   mutate(across( -->
+<!-- #     everything(),  -->
+<!-- #         ~dplyr::first(.), -->
+<!-- #     .names  = "first_{.col}" -->
+<!-- #     )) %>%  -->
+<!-- #   ungroup() -->
+
+
+<!-- # make df of first visit phenotype values;  if first visit value @ phenotype is NA, grab first non-na, else, NA; exclude duplicated rows -->
+<!-- first_values_df <- model_df %>%  -->
+<!--   select(-patID, - SEXF) %>%  -->
+<!--   arrange(patID_eye, month) %>%   -->
+<!--   group_by(patID_eye) %>% -->
+<!--   # mutate(across( -->
+<!--   #   everything(),  -->
+<!--   #   ~ifelse(  -->
+<!--   #       is.na(dplyr::first(.)), -->
+<!--   #       dplyr::n(., n = 2),  -->
+<!--   #       dplyr::first(.) -->
+<!--   #   ), -->
+<!--   #   .names  = "first_{.col}" -->
+<!--   #   )) %>%  -->
+<!--   mutate( -->
+<!--     across( -->
+<!--         -matches("FA"),  -->
+<!--         ~dplyr::first(.[!is.na(.)]), -->
+<!--         .names = "first_{.col}" -->
+<!--   )) %>% -->
+<!--   ungroup() %>% -->
+<!--   select(-matches("month"), -matches("FA_mean")) %>%  -->
+<!--   select(patID_eye,  starts_with("first_")) %>%  -->
+<!--   unique() %>%  -->
+<!--   arrange(patID_eye) -->
+
+<!-- # filter out the firsts that don't make sense -->
+<!-- model_df_first <- model_df %>%  -->
+<!--   arrange(patID_eye) %>%  -->
+<!--   select(patID_eye, patID, SEXF, FA_mean_rate) %>%  -->
+<!--   na.omit() %>% -->
+<!--   unique() %>%   -->
+<!--   left_join(., first_values_df) %>%  -->
+<!--   as.data.frame() -->
+
+<!-- ``` -->
+
+
+
+<!-- #### model each variable against FA_mean_rate, using zonal phenotype averages -->
+<!-- ```{r} -->
+
+<!-- # what phenos to sum -->
+<!-- zonal_pheno_names <- grep("_.*0\\d$", names(model_df_first), value = TRUE) %>%  -->
+<!--     gsub("0\\d",'', . ) %>%  -->
+<!--     unique() -->
+
+
+<!-- # for each pheno name, sum the columns in model_df_first -->
+<!-- for (zonal_pheno in zonal_pheno_names){ -->
+<!--   new_name <- paste0(zonal_pheno, "_sum") -->
+<!--   model_df_first[[new_name]] <- model_df_first[, grep(zonal_pheno, names(model_df_first))] %>%  -->
+<!--     rowSums(.) -->
+<!-- } -->
+
+<!-- # exclude the response variable, FA_mean_rate and sum variables -->
+<!-- input_phenotypes <- names(model_df_first)[!names(model_df_first) %in% c("month", "patID_eye", "patID", "SEXF", "FA_mean_rate")] %>%  -->
+<!--   grep("0_sum", ., value = TRUE, invert = TRUE) # ignore existent sum variables -->
+
+<!-- # formulas -->
+<!-- form_strs <- paste0(response," ~ ",input_phenotypes," + SEXF  + (1|patID)") -->
+
+<!-- # for each variable in input_phenotypes, model FA_mean  -->
+<!-- results_list <- mclapply(form_strs, function(form_str){ -->
+
+<!--   ## linear model with random effects -->
+<!--   re_formula <- as.formula(form_str) -->
+
+<!--   fit <- try({lmer(formula = re_formula, data = model_df_first)}) -->
+
+<!--   return(summary(fit)) -->
+
+<!-- }, mc.cores = detectCores()-1) -->
+
+<!-- names(results_list) <- sub("\\s\\+.*", "", form_strs) -->
+
+<!-- # filter for models that worked -->
+<!-- results_list <- results_list[unlist(lapply(results_list, function(x) !all(class(x) %in% c("summaryDefault", "table"))))] -->
+
+<!-- ## make results df #### -->
+<!-- results_df <- extract_results(results_list) -->
+
+<!-- results_df <- results_df %>%  -->
+<!--   filter(!Term %in% c("(Intercept)", "SEXF", "month")) -->
+
+<!-- VA_mean_rate_results_df <- results_df -->
+
+<!-- # filter for models that don't make sense -->
+<!-- results_df_filtered <- results_df %>%  -->
+<!--   # filter(!Model   %in% grep("FA|SEX", results_df$Model, value = TRUE)) %>%  -->
+<!--   filter(!Term   %in% grep("avg|MT0|_.*0\\d$|RW\\d|SEX", results_df$Term, value = TRUE)) # exclude MT vars and zonal vars -->
+
+<!-- ### plot #### -->
+<!-- VA_rate_by_phenos_volcano_summed_phenos <-ggplot(results_df, aes(x = Estimate, y = -log10(q_value), color = Term))+ -->
+<!--       geom_point(show.legend = FALSE)+ -->
+<!--       geom_label_repel(aes(label = ifelse( q_value <= .05,  Term, NA)), -->
+<!--                        size = 4, -->
+<!--                        nudge_y = 0.5, -->
+<!--                        show.legend = FALSE, -->
+<!--                        max.overlaps = 20)+ -->
+<!--       geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+ -->
+<!--       geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+ -->
+<!--       theme_bw()+ -->
+<!--       # facet_wrap(~quintile, scales = "fixed")+ -->
+<!--       ggtitle("VA_factor_mean_rate ~ SEXF + phenotype_i + (1 | patID)") -->
+
+<!-- ggsave(paste0(VA_modeling_path, "VA_rate_by_phenos_volcano_summed_phenos.png"), VA_rate_by_phenos_volcano_summed_phenos, width = 20, height = 12, dpi = 200) -->
+
+<!-- VA_rate_by_phenos_volcano_summed_phenos_filtered <-ggplot(results_df_filtered, aes(x = Estimate, y = -log10(q_value), color = Term))+ -->
+<!--       geom_point(show.legend = FALSE)+ -->
+<!--       geom_label_repel(aes(label = ifelse( q_value <= .05,  Term, NA)), -->
+<!--                        size = 4, -->
+<!--                        nudge_y = 0.5, -->
+<!--                        show.legend = FALSE, -->
+<!--                        max.overlaps = 20)+ -->
+<!--       geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+ -->
+<!--       geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+ -->
+<!--       theme_bw()+ -->
+<!--       # facet_wrap(~quintile, scales = "fixed")+ -->
+<!--       ggtitle("VA_factor_mean_rate ~ SEXF + phenotype_i + (1 | patID)") -->
+
+<!-- ggsave(paste0(VA_modeling_path, "VA_rate_by_phenos_volcano_summed_phenos_filtered.png"), VA_rate_by_phenos_volcano_summed_phenos_filtered, width = 20, height = 12, dpi = 200) -->
+
+<!-- VA_rate_by_phenos_volcano_summed_phenos_filtered_nominalP <-ggplot(results_df_filtered, aes(x = Estimate, y = -log10(`Pr(>|t|)`), color = Model))+ -->
+<!--       geom_point(show.legend = FALSE)+ -->
+<!--       geom_label_repel(aes(label = ifelse( `Pr(>|t|)` < .05,  Term, NA)), -->
+<!--                        size = 4, -->
+<!--                        nudge_y = 0.5, -->
+<!--                        show.legend = FALSE, -->
+<!--                        max.overlaps = 20)+ -->
+<!--       geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+ -->
+<!--       geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+ -->
+<!--       theme_bw()+ -->
+<!--       # facet_wrap(~quintile, scales = "fixed")+ -->
+<!--       ggtitle("VA_factor_mean_rate ~ SEXF + phenotype_i + (1 | patID)") -->
+
+<!-- ggsave(paste0(VA_modeling_path, "VA_rate_by_phenos_volcano_summed_phenos_filtered_nominalP.png"), VA_rate_by_phenos_volcano_summed_phenos_filtered_nominalP, width = 20, height = 12, dpi = 200) -->
+
+<!-- ``` -->
+
+<!-- <!-- ```{r} --> -->
+
+
+<!-- <!-- km <- kmeans(results_df_filtered[, c("q_value", "Estimate"), ], centers =  6) --> -->
+<!-- <!-- # db <- dbscan::dbscan(results_df_filtered[, c("q_value", "Estimate"), ], eps = .01,minPts = 2) --> -->
+
+<!-- <!-- clusters <- km$cluster --> -->
+<!-- <!-- # clusters <- db$cluster+1 --> -->
+<!-- <!-- table(clusters) --> -->
+
+<!-- <!-- cols <- palKelly()[seq(n_distinct(clusters))][clusters] --> -->
+
+<!-- <!-- ggplot(results_df_filtered, aes(x = Estimate, y = -log10(`Pr(>|t|)`)))+ --> -->
+<!-- <!--   geom_point(show.legend = TRUE, color = cols) --> -->
+
+<!-- <!-- clusters[clusters==4] --> -->
+<!-- <!-- ``` --> -->
+
+
+
+<!-- ## FA1 Rate by phenotypes -->
+
+<!-- #### subset data to scale and model -->
+<!-- * filter out the ones with (rows>0) < 30 -->
+<!-- ```{r} -->
+
+<!-- # #  variables (rows of value>0) < 30 where FA1_rate present -->
+<!-- # m <- d[!is.na(d$FA1_rate),phenotypes] != 0 -->
+<!-- # vars <- m %>% -->
+<!-- #   colSums(., na.rm = TRUE)  -->
+<!-- #  -->
+<!-- # # variables with > 30 obs of value>0  -->
+<!-- # deviant_vars <- vars[vars > 30] %>% names() -->
+<!-- #  -->
+<!-- # # how many unique months do these have where FA1_rate and var available? -->
+<!-- # count_unq_months <-  sapply(deviant_vars, function(x){  -->
+<!-- #                     # how many unique months where both mr and var available? -->
+<!-- #                     return( d $month[!is.na(d$FA1_rate) & !is.na(d[,x])] %>%  -->
+<!-- #                              unique() %>% -->
+<!-- #                              length() -->
+<!-- #                             ) -->
+<!-- #                   }) -->
+<!-- # # vars with greater than one unique month observed  -->
+<!-- # FA1_rate_greater_than_one_month <- count_unq_months[count_unq_months>1] %>%  -->
+<!-- #   names() -->
+<!-- #  -->
+<!-- # FA1_rate_greater_than_one_month <- c(FA1_rate_greater_than_one_month, "FA1_rate") -->
+
+<!-- # setdiff(deviant_vars ,greater_than_one_month  ) # "BLRPATTERN"  "NOABNORMFAF" only have 1 month of observations where >30 records of rows of value > 0 -->
+
+<!-- # # subset d with vars of interest  -->
+<!-- # model_df <- d %>%  -->
+<!-- #   select(month, patID_eye, patID, SEXF, all_of(FA1_rate_greater_than_one_month)) -->
+<!-- #  -->
+<!-- # # scale vars of interest -->
+<!-- # model_df[, FA1_rate_greater_than_one_month] <- scale(model_df[, FA1_rate_greater_than_one_month]) -->
+
+<!-- response = 'FA1_rate' -->
+<!-- # subset d with vars of interest  -->
+<!-- model_df <- d %>%  -->
+<!--   select(month, patID_eye, patID, SEXF, all_of(c(phenotypes, response))) -->
+
+<!-- # scale vars of interest, minus response: FA1_rate -->
+<!-- model_df[, phenotypes[phenotypes!=response] ] <- scale(model_df[, phenotypes[phenotypes!=response] ]) -->
+
+
+<!-- # # reduce model_df to patient's rate and first_visit phenotype value -->
+<!-- # model_df_first <- model_df %>%  -->
+<!-- #   arrange(month) %>%   -->
+<!-- #   group_by(patID_eye) %>% -->
+<!-- #   mutate(across( -->
+<!-- #     everything(),  -->
+<!-- #     ~dplyr::first(.), -->
+<!-- #     .names  = "first_{.col}" -->
+<!-- #     )) %>%  -->
+<!-- #   ungroup() -->
+<!-- #  -->
+<!-- #  -->
+<!-- #  -->
+<!-- # model_df_first_filtered <- model_df_first %>%  -->
+<!-- #   select(patID_eye, patID, SEXF, FA1_rate, starts_with("first")) %>%    -->
+<!-- #   select(!matches("first.*\\d_rate")) %>%  -->
+<!-- #   select(!c("first_SEXF", "first_month", "first_patID")) %>%  -->
+<!-- #   unique() -->
+
+
+<!-- # make df of first visit phenotype values;  if first visit value @ phenotype is NA, grab first non-na, else, NA; exclude duplicated rows -->
+<!-- first_values_df <- model_df %>%  -->
+<!--   select(-patID, - SEXF) %>%  -->
+<!--   arrange(patID_eye, month) %>%   -->
+<!--   group_by(patID_eye) %>% -->
+<!--   mutate( -->
+<!--     across( -->
+<!--         everything(),  -->
+<!--         ~dplyr::first(.[!is.na(.)]), -->
+<!--         .names = "first_{.col}" -->
+<!--   )) %>% -->
+<!--   ungroup() %>% -->
+<!--   select(-matches("month"), -matches("FA1_rate")) %>%  -->
+<!--   select(patID_eye,  starts_with("first_")) %>%  -->
+<!--   unique() %>%  -->
+<!--   arrange(patID_eye) -->
+
+<!-- # filter out the firsts that don't make sense -->
+<!-- model_df_first <- model_df %>%  -->
+<!--   arrange(patID_eye) %>%  -->
+<!--   select(patID_eye, patID, SEXF, FA1_rate) %>%  -->
+<!--   na.omit() %>% -->
+<!--   unique() %>%   -->
+<!--   left_join(., first_values_df) -->
+
+
+
+
+<!-- ``` -->
+
+<!-- ###### rate plots height and width -->
+<!-- ```{r} -->
+
+<!-- h_w <- c(10,15) -->
+
+<!-- ``` -->
+
+<!-- #### model each variable against FA1_rate, using zonal phenotype averages -->
+<!-- ```{r} -->
+
+<!-- # what phenos to sum -->
+<!-- zonal_pheno_names <- grep("_.*0\\d$", names(model_df_first), value = TRUE) %>%  -->
+<!--     gsub("0\\d",'', . ) %>%  -->
+<!--     unique() -->
+
+
+<!-- # for each pheno name, sum the columns in model_df_first -->
+<!-- for (zonal_pheno in zonal_pheno_names){ -->
+<!--   new_name <- paste0(zonal_pheno, "_sum") -->
+<!--   model_df_first[[new_name]] <- model_df_first[, grep(zonal_pheno, names(model_df_first))] %>%  -->
+<!--     rowSums(.) -->
+<!-- } -->
+
+<!-- # exclude the response variable, FA1_rate and sum variables -->
+<!-- input_phenotypes <- names(model_df_first)[!names(model_df_first) %in% c("month", "patID_eye", "patID", "SEXF", "FA1_rate")] %>%  -->
+<!--   grep("0_sum", ., value = TRUE, invert = TRUE) # ignore existent sum variables -->
+
+<!-- # formulas -->
+<!-- form_strs <- paste0(response," ~ ",input_phenotypes," + SEXF  + (1|patID)") -->
+
+<!-- # for each variable in input_phenotypes, model FA_mean  -->
+<!-- results_list <- mclapply(form_strs, function(form_str){ -->
+
+<!--   ## linear model with random effects -->
+<!--   re_formula <- as.formula(form_str) -->
+
+<!--   fit <- try({lmer(formula = re_formula, data = model_df_first)}) -->
+
+<!--   return(summary(fit)) -->
+
+<!-- }, mc.cores = detectCores()-1) -->
+
+<!-- names(results_list) <- sub("\\s\\+.*", "", form_strs) -->
+
+<!-- # filter for models that worked -->
+<!-- results_list <- results_list[unlist(lapply(results_list, function(x) !all(class(x) %in% c("summaryDefault", "table"))))] -->
+
+<!-- ## make results df #### -->
+<!-- results_df <- extract_results(results_list) -->
+
+<!-- results_df <- results_df %>%  -->
+<!--   filter(!Term %in% c("(Intercept)", "SEXF", "month")) -->
+
+<!-- # filter for models that don't make sense -->
+<!-- results_df_filtered <- results_df %>%  -->
+<!--   filter(!Model   %in% grep("FA|SEX", results_df$Model, value = TRUE)) %>%  -->
+<!--   filter(!Model   %in% grep("avg|MT0|_.*0\\d$|SEX", results_df$Model, value = TRUE)) # exclude MT vars and zonal vars -->
+
+<!-- FA1_rate_results_df <- results_df -->
+
+<!-- ### volcano plot of vaa~phenotypes result #### -->
+<!-- FA1_rate_by_phenos_volcano_summed_phenos <-ggplot(results_df, aes(x = Estimate, y = -log10(q_value), color = Term))+ -->
+<!--       geom_point(show.legend = FALSE)+ -->
+<!--       geom_label_repel(aes(label = ifelse( q_value <= .05,  Term, NA)), -->
+<!--                        size = 4, -->
+<!--                        nudge_y = 0.5, -->
+<!--                        show.legend = FALSE, -->
+<!--                        max.overlaps = 20)+ -->
+<!--       geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+ -->
+<!--       geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+ -->
+<!--       theme_bw()+ -->
+<!--       # facet_wrap(~quintile, scales = "fixed")+ -->
+<!--       ggtitle("VA_factor_1_rate ~ SEXF + phenotype_i + (1 | patID)") -->
+
+<!-- ggsave(paste0(VA_modeling_path, "FA1_rate_by_phenos_volcano_summed_phenos.png"), FA1_rate_by_phenos_volcano_summed_phenos, width = 20, height = 12, dpi = 200) -->
+
+<!-- FA1_rate_by_phenos_volcano_summed_phenos_filtered <-ggplot(results_df_filtered, aes(x = Estimate, y = -log10(q_value), color = Term))+ -->
+<!--       geom_point(show.legend = FALSE)+ -->
+<!--       geom_label_repel(aes(label = ifelse( q_value <= .05,  Term, NA)), -->
+<!--                        size = 4, -->
+<!--                        nudge_y = 0.5, -->
+<!--                        show.legend = FALSE, -->
+<!--                        max.overlaps = 20)+ -->
+<!--       geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+ -->
+<!--       geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+ -->
+<!--       theme_bw()+ -->
+<!--       # facet_wrap(~quintile, scales = "fixed")+ -->
+<!--       ggtitle("VA_factor_1_rate ~ SEXF + phenotype_i + (1 | patID)") -->
+
+<!-- ggsave(paste0(VA_modeling_path, "FA1_rate_by_phenos_volcano_summed_phenos_filtered.png"), FA1_rate_by_phenos_volcano_summed_phenos_filtered, width = 20, height = 12, dpi = 200) -->
+
+<!-- FA1_rate_by_phenos_volcano_summed_phenos_filtered_nominalP <-ggplot(results_df_filtered, aes(x = Estimate, y = -log10(`Pr(>|t|)`), color = Model))+ -->
+<!--       geom_point(show.legend = FALSE)+ -->
+<!--       geom_label_repel(aes(label = ifelse( `Pr(>|t|)` < .05,  Term, NA)), -->
+<!--                        size = 5, -->
+<!--                        # nudge_y = 0.5, -->
+<!--                        show.legend = FALSE, -->
+<!--                        max.overlaps = 20)+ -->
+<!--       geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+ -->
+<!--       geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+ -->
+<!--       theme_bw()+ -->
+<!--       # facet_wrap(~quintile, scales = "fixed")+ -->
+<!--       ggtitle("VA_factor_1_rate ~ SEXF + phenotype_i + (1 | patID)") -->
+
+<!-- ggsave(paste0(VA_modeling_path, "FA1_rate_by_phenos_volcano_summed_phenos_filtered_nominalP.png"), FA1_rate_by_phenos_volcano_summed_phenos_filtered_nominalP,  width = h_w[2], height = h_w[1], dpi = 200) -->
+
+<!-- # add results to list -->
+<!-- poster_results_dfs <- list() -->
+<!-- FA1_rate_results_df_filtered <- results_df_filtered -->
+<!-- poster_results_dfs[["FA1_rate_results_df_filtered"]] <- FA1_rate_results_df_filtered -->
+
+
+
+<!-- ``` -->
+
+<!-- ## FA2 Rate by phenotypes -->
+
+<!-- #### subset data to scale and model -->
+<!-- * filter out the ones with (rows>0) < 30 -->
+<!-- ```{r} -->
+
+<!-- # #  variables (rows of value>0) < 30 where FA2_rate present -->
+<!-- # m <- d[!is.na(d$FA2_rate),phenotypes] != 0 -->
+<!-- # vars <- m %>% -->
+<!-- #   colSums(., na.rm = TRUE)  -->
+<!-- #  -->
+<!-- # # variables with > 30 obs of value>0  -->
+<!-- # deviant_vars <- vars[vars > 30] %>% names() -->
+<!-- #  -->
+<!-- # # how many unique months do these have where FA2_rate and var available? -->
+<!-- # count_unq_months <-  sapply(deviant_vars, function(x){  -->
+<!-- #                     # how many unique months where both mr and var available? -->
+<!-- #                     return( d $month[!is.na(d$FA2_rate) & !is.na(d[,x])] %>%  -->
+<!-- #                              unique() %>% -->
+<!-- #                              length() -->
+<!-- #                             ) -->
+<!-- #                   }) -->
+<!-- # # vars with greater than one unique month observed  -->
+<!-- # FA2_rate_greater_than_one_month <- count_unq_months[count_unq_months>1] %>%  -->
+<!-- #   names() -->
+<!-- #  -->
+<!-- # FA2_rate_greater_than_one_month <- c(FA2_rate_greater_than_one_month, "FA2_rate") -->
+
+<!-- # setdiff(deviant_vars ,greater_than_one_month  ) # "BLRPATTERN"  "NOABNORMFAF" only have 1 month of observations where >30 records of rows of value > 0 -->
+
+<!-- # # subset d with vars of interest  -->
+<!-- # model_df <- d %>%  -->
+<!-- #   select(month, patID_eye, patID, SEXF, all_of(FA2_rate_greater_than_one_month)) -->
+<!-- #  -->
+<!-- # # scale vars of interest -->
+<!-- # model_df[, FA2_rate_greater_than_one_month] <- scale(model_df[, FA2_rate_greater_than_one_month]) -->
+
+<!-- response ="FA2_rate" -->
+<!-- # subset d with vars of interest  -->
+<!-- model_df <- d %>%  -->
+<!--   select(month, patID_eye, patID, SEXF, all_of(c(phenotypes, response))) -->
+
+<!-- # scale vars of interest, minus response: FA2_rate -->
+<!-- model_df[, phenotypes[phenotypes!=response] ] <- scale(model_df[, phenotypes[phenotypes!=response] ]) -->
+
+
+<!-- # # reduce model_df to patient's rate and first_visit phenotype value -->
+<!-- # model_df_first <- model_df %>%  -->
+<!-- #   arrange(month) %>%   -->
+<!-- #   group_by(patID_eye) %>% -->
+<!-- #   mutate(across( -->
+<!-- #     everything(),  -->
+<!-- #     ~dplyr::first(.), -->
+<!-- #     .names  = "first_{.col}" -->
+<!-- #     )) %>%  -->
+<!-- #   ungroup() -->
+<!-- #  -->
+<!-- #  -->
+<!-- #  -->
+<!-- # model_df_first_filtered <- model_df_first %>%  -->
+<!-- #   select(patID_eye, patID, SEXF, FA2_rate, starts_with("first")) %>%    -->
+<!-- #   select(!matches("first.*\\d_rate")) %>%  -->
+<!-- #   select(!c("first_SEXF", "first_month", "first_patID")) %>%  -->
+<!-- #   unique() -->
+
+
+<!-- # make df of first visit phenotype values;  if first visit value @ phenotype is NA, grab first non-na, else, NA; exclude duplicated rows -->
+<!-- first_values_df <- model_df %>%  -->
+<!--   select(-patID, - SEXF) %>%  -->
+<!--   arrange(patID_eye, month) %>%   -->
+<!--   group_by(patID_eye) %>% -->
+<!--   mutate( -->
+<!--     across( -->
+<!--         everything(),  -->
+<!--         ~dplyr::first(.[!is.na(.)]), -->
+<!--         .names = "first_{.col}" -->
+<!--   )) %>% -->
+<!--   ungroup() %>% -->
+<!--   select(-matches("month"), -matches("FA2_rate")) %>%  -->
+<!--   select(patID_eye,  starts_with("first_")) %>%  -->
+<!--   unique() %>%  -->
+<!--   arrange(patID_eye) -->
+
+<!-- # filter out the firsts that don't make sense -->
+<!-- model_df_first <- model_df %>%  -->
+<!--   arrange(patID_eye) %>%  -->
+<!--   select(patID_eye, patID, SEXF, FA2_rate) %>%  -->
+<!--   na.omit() %>% -->
+<!--   unique() %>%   -->
+<!--   left_join(., first_values_df) -->
+
+<!-- ``` -->
+
+
+<!-- #### model each variable against FA2_rate, using zonal phenotype averages -->
+<!-- ```{r} -->
+
+<!-- # what phenos to sum -->
+<!-- zonal_pheno_names <- grep("_.*0\\d$", names(model_df_first), value = TRUE) %>%  -->
+<!--     gsub("0\\d",'', . ) %>%  -->
+<!--     unique() -->
+
+
+<!-- # for each pheno name, sum the columns in model_df_first -->
+<!-- for (zonal_pheno in zonal_pheno_names){ -->
+<!--   new_name <- paste0(zonal_pheno, "_sum") -->
+<!--   model_df_first[[new_name]] <- model_df_first[, grep(zonal_pheno, names(model_df_first))] %>%  -->
+<!--     rowSums(.) -->
+<!-- } -->
+
+<!-- # exclude the response variable, FA2_rate and sum variables -->
+<!-- input_phenotypes <- names(model_df_first)[!names(model_df_first) %in% c("month", "patID_eye", "patID", "SEXF", "FA2_rate")] %>%  -->
+<!--   grep("0_sum", ., value = TRUE, invert = TRUE) # ignore existent sum variables -->
+
+<!-- # formulas -->
+<!-- form_strs <- paste0(response," ~ ",input_phenotypes," + SEXF  + (1|patID)") -->
+
+<!-- # for each variable in input_phenotypes, model FA_mean  -->
+<!-- results_list <- mclapply(form_strs, function(form_str){ -->
+
+<!--   ## linear model with random effects -->
+<!--   re_formula <- as.formula(form_str) -->
+
+<!--   fit <- try({lmer(formula = re_formula, data = model_df_first)}) -->
+
+<!--   return(summary(fit)) -->
+
+<!-- }, mc.cores = detectCores()-1) -->
+
+<!-- names(results_list) <- sub("\\s\\+.*", "", form_strs) -->
+
+<!-- # filter for models that worked -->
+<!-- results_list <- results_list[unlist(lapply(results_list, function(x) !all(class(x) %in% c("summaryDefault", "table"))))] -->
+
+<!-- ## make results df #### -->
+<!-- results_df <- extract_results(results_list) -->
+
+<!-- results_df <- results_df %>%  -->
+<!--   filter(!Term %in% c("(Intercept)", "SEXF", "month")) -->
+
+<!-- # filter for models that don't make sense -->
+<!-- results_df_filtered <- results_df %>%  -->
+<!--   filter(!Model   %in% grep("FA|SEX", results_df$Model, value = TRUE)) %>%  -->
+<!--   filter(!Model   %in% grep("avg|MT0|_.*0\\d$|SEX", results_df$Model, value = TRUE)) # exclude MT vars and zonal vars -->
+
+
+<!-- FA2_rate_results_df <- results_df -->
+
+<!-- ### volcano plot of vaa~phenotypes result #### -->
+<!-- FA2_rate_by_phenos_volcano_summed_phenos <-ggplot(results_df, aes(x = Estimate, y = -log10(q_value), color = Model))+ -->
+<!--       geom_point(show.legend = FALSE)+ -->
+<!--       geom_label_repel(aes(label = ifelse( q_value <= .05,  Model, NA)), -->
+<!--                        size = 4, -->
+<!--                        nudge_y = 0.5, -->
+<!--                        show.legend = FALSE, -->
+<!--                        max.overlaps = 20)+ -->
+<!--       geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+ -->
+<!--       geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+ -->
+<!--       theme_bw()+ -->
+<!--       # facet_wrap(~quintile, scales = "fixed")+ -->
+<!--       ggtitle("VA_factor_2_rate ~ SEXF + phenotype_i + (1 | patID)") -->
+
+<!-- ggsave(paste0(VA_modeling_path, "FA2_rate_by_phenos_volcano_summed_phenos.png"), FA2_rate_by_phenos_volcano_summed_phenos, width = 20, height = 12, dpi = 200) -->
+
+<!-- FA2_rate_by_phenos_volcano_summed_phenos_filtered <-ggplot(results_df_filtered, aes(x = Estimate, y = -log10(q_value), color = Model))+ -->
+<!--       geom_point(show.legend = FALSE)+ -->
+<!--       geom_label_repel(aes(label = ifelse( q_value <= .05,  Model, NA)), -->
+<!--                        size = 4, -->
+<!--                        nudge_y = 0.5, -->
+<!--                        show.legend = FALSE, -->
+<!--                        max.overlaps = 20)+ -->
+<!--       geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+ -->
+<!--       geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+ -->
+<!--       theme_bw()+ -->
+<!--       # facet_wrap(~quintile, scales = "fixed")+ -->
+<!--       ggtitle("VA_factor_2_rate ~ SEXF + phenotype_i + (1 | patID)") -->
+
+<!-- ggsave(paste0(VA_modeling_path, "FA2_rate_by_phenos_volcano_summed_phenos_filtered.png"), FA2_rate_by_phenos_volcano_summed_phenos_filtered, width = 20, height = 12, dpi = 200) -->
+
+<!-- FA2_rate_by_phenos_volcano_summed_phenos_filtered_nominalP <-ggplot(results_df_filtered, aes(x = Estimate, y = -log10(`Pr(>|t|)`), color = Model))+ -->
+<!--       geom_point(show.legend = FALSE)+ -->
+<!--       geom_label_repel(aes(label = ifelse( `Pr(>|t|)` < .05,  Model, NA)), -->
+<!--                        size = 4, -->
+<!--                        # nudge_y = 0.5, -->
+<!--                        show.legend = FALSE, -->
+<!--                        max.overlaps = 20)+ -->
+<!--       geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+ -->
+<!--       geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+ -->
+<!--       theme_bw()+ -->
+<!--       # facet_wrap(~quintile, scales = "fixed")+ -->
+<!--       ggtitle("VA_factor_2_rate ~ SEXF + phenotype_i + (1 | patID)") -->
+
+<!-- ggsave(paste0(VA_modeling_path, "FA2_rate_by_phenos_volcano_summed_phenos_filtered_nominalP.png"), FA2_rate_by_phenos_volcano_summed_phenos_filtered_nominalP, width = h_w[2], height = h_w[1], dpi = 200) -->
+
+
+<!-- # add results to list -->
+<!-- FA2_rate_results_df_filtered <- results_df_filtered -->
+<!-- poster_results_dfs[["FA2_rate_results_df_filtered"]] <- FA2_rate_results_df_filtered -->
+
+<!-- ``` -->
+
+
+<!-- ##### corrplot of betas -->
+<!-- ```{r} -->
+
+<!-- FA_mean <- VA_mean_rate_results_df %>%  -->
+<!--   select(Term, Estimate) %>% -->
+<!--   filter(!grepl("SEX", Term)) %>%  -->
+<!--   rename_with(~all_of(c("Term", "FA_mean_Estimate"))) -->
+
+<!-- FA1 <- FA1_rate_results_df %>%  -->
+<!--   filter(!grepl("SEX", Term)) %>%  -->
+<!--   select(Term, Estimate) %>%  -->
+<!--   rename_with(~all_of(c("Term", "FA1_Estimate"))) -->
+
+<!-- estimates <- merge(FA1, FA_mean) %>%  -->
+<!--   column_to_rownames("Term") %>%  -->
+<!--   as.matrix() -->
+
+<!-- Heatmap(estimates) -->
+<!-- plot(estimates, type = "n");text(estimates,  -->
+<!--                                  labels = rownames(estimates),  -->
+<!--                                  # pos = 4,  -->
+<!--                                  col = rainbow(length(estimates)) -->
+<!--                                  );abline(c(0,1), lty = 3) -->
+
+
+<!-- ``` -->
+
+
+<!-- <!-- ##### find what's driving crystal_dep significance in the FA_mean_rate model --> -->
+<!-- <!-- ```{r} --> -->
+
+
+<!-- <!-- # find first value of each patient for FA rates and CRYSTALDEP --> -->
+<!-- <!-- CRYSTALDEP_model_df <- d %>%  --> -->
+<!-- <!--   select(month, SEXF, patID, patID_eye, grep("FA.*_rate", names(d), value = TRUE), CRYSTALDEP) %>%  --> -->
+<!-- <!--   arrange(month) %>%   --> -->
+<!-- <!--   group_by(patID_eye) %>% --> -->
+<!-- <!--   mutate(across( --> -->
+<!-- <!--     all_of(c(grep("FA.*_rate", names(d), value = TRUE), "CRYSTALDEP") ),  --> -->
+<!-- <!--     ~dplyr::first(.[!is.na(.)]), --> -->
+<!-- <!--     .names  = "first_{.col}" --> -->
+<!-- <!--     )) %>%  --> -->
+<!-- <!--   ungroup() %>%  --> -->
+<!-- <!--   select(!c(grep("FA.*_rate", names(d), value = TRUE), "CRYSTALDEP"))%>%  --> -->
+<!-- <!--   select(-month) %>%  --> -->
+<!-- <!--   unique() --> -->
+
+<!-- <!-- CRYSTALDEP_results_list <- list() ; for (factor_name in paste0("first_", c("FA1_rate", "FA2_rate"))){ #, "FA3_rate", "FA4_rate", "FA_mean_rate"))  ) { --> -->
+
+<!-- <!--   re_formula <- as.formula( paste0(factor_name, " ~ SEXF  + first_CRYSTALDEP + (1|patID)") ) --> -->
+<!-- <!--   re_formula %>% print() --> -->
+
+
+<!-- <!--   CRYSTALDEP_results_list[[factor_name]] <- summary(lmer(formula = re_formula, data = CRYSTALDEP_model_df)) --> -->
+<!-- <!--   } --> -->
+
+<!-- <!-- CRYSTALDEP_results <- data.frame(Model = character(),  Term = character(),Estimate = numeric(), --> -->
+<!-- <!--                          Std.Error = numeric(),t.value = numeric(),Pr = numeric(),stringsAsFactors = FALSE) --> -->
+
+
+<!-- <!-- for (model_name in names(CRYSTALDEP_results_list)){ --> -->
+
+<!-- <!--   model_coef <- coef(CRYSTALDEP_results_list[[model_name]]) --> -->
+<!-- <!--   a_result_df <- data.frame(Model = model_name,  --> -->
+<!-- <!--                          Term = rownames(model_coef),  --> -->
+<!-- <!--                          Estimate = model_coef[, "Estimate"], --> -->
+<!-- <!--                          Std.Error = model_coef[, "Std. Error"], --> -->
+<!-- <!--                          t.value = model_coef[, "t value"], --> -->
+<!-- <!--                         `Pr(>|t|)`= model_coef[, "Pr(>|t|)"]) --> -->
+
+<!-- <!--   CRYSTALDEP_results <- rbind(CRYSTALDEP_results, a_result_df) --> -->
+<!-- <!-- } --> -->
+
+<!-- <!-- CRYSTALDEP_results <- CRYSTALDEP_results %>%  --> -->
+<!-- <!--   filter(Term == "first_CRYSTALDEP") --> -->
+
+<!-- <!-- CRYSTALDEP_results$q_value <=- p.adjust(CRYSTALDEP_results$Pr) --> -->
+
+<!-- <!-- ggplot(CRYSTALDEP_results, aes(Estimate, -log10(q_value), color = Model))+ --> -->
+<!-- <!--   geom_point()+ --> -->
+<!-- <!--   geom_label_repel(aes(label =  Model), --> -->
+<!-- <!--                        size = 3, --> -->
+<!-- <!--                        show.legend = FALSE)+ --> -->
+<!-- <!--   theme_bw()+ --> -->
+<!-- <!--   ggtitle("VA_factor_i ~ SEXF + first_CRYSTALDEP + (1|patID)") --> -->
+
+<!-- <!-- ``` --> -->
+
+<!-- ## regress mean rate by factors within each cluster -->
+<!-- ### vision of each cluster for each trajectory -->
+<!-- ```{r, eval = FALSE} -->
+
+<!-- d <- d %>%  -->
+<!--   mutate( -->
+<!--     tiny_letters = rowMeans(across(matches("RW1[234]")), na.rm = TRUE), -->
+<!--     small_letters = rowMeans(across(matches("RW1[01]|RW0[89]")),na.rm = TRUE), -->
+<!--     medium_letters = rowMeans(across(matches("RW0[4567]")),na.rm = TRUE), -->
+<!--     large_letters = rowMeans(across(matches("RW0[123]")) ,na.rm = TRUE) -->
+<!--          ) -->
+
+<!-- # For row scores --------- -->
+<!-- cluster_letter_means <- d %>%  -->
+<!--   select(patID_eye, month, my_cluster, matches("letters")) %>%  -->
+<!--   pivot_longer(cols = matches("letters"), names_to = "variable")  -->
+
+
+
+<!-- # Define edge list -->
+<!-- # edges <- -->
+<!-- metadata(sce)$trajectory_data$pca_line_data %>%  -->
+<!--   select(edge, PC1:PC2) %>%  -->
+<!--   ggplot(aes(PC1,PC2))+ -->
+<!--     geom_point()+ -->
+<!--     geom_line(aes(group = edge, colour = edge))+ -->
+<!--     geom_label(aes(label = edge), size = 3)+ -->
+<!--     theme_void() -->
+
+<!-- edges <- metadata(sce)$trajectory_data$pca_line_data %>%  -->
+<!--   select(edge) %>%  -->
+<!--   separate(edge, c("from", "to"), sep = "--") %>%  -->
+<!--   distinct() %>%  -->
+<!--   as.matrix()  -->
+<!-- edges <- rbind(edges, edges[,c(2,1)]) -->
+
+<!-- # Build adjacency list -->
+<!-- build_adj_list <- function(edges) { -->
+<!--   adj <- split(edges[,2], edges[,1]) -->
+<!--   return(adj) -->
+<!-- } -->
+
+<!-- adj_list <- build_adj_list(edges) -->
+
+<!-- # Find all paths from root node -->
+<!-- find_paths <- function(adj_list, current, visited = character(), path = character()) { -->
+<!--   visited <- c(visited, current) -->
+<!--   path <- c(path, current) -->
+
+<!--   neighbors <- adj_list[[current]] -->
+<!--   if (is.null(neighbors)) { -->
+<!--     return(list(path)) -->
+<!--   } -->
+
+<!--   paths <- list() -->
+<!--   for (neighbor in neighbors) { -->
+<!--     if (!(neighbor %in% visited)) { -->
+<!--       new_paths <- find_paths(adj_list, neighbor, visited, path) -->
+<!--       paths <- c(paths, new_paths) -->
+<!--     } -->
+<!--   } -->
+
+<!--   if (length(paths) == 0) { -->
+<!--     return(list(path))  # If no children, return current path -->
+<!--   } else { -->
+<!--     return(paths) -->
+<!--   } -->
+<!-- } -->
+
+
+<!-- # Run from root -->
+<!-- paths <- find_paths(adj_list, 4) -->
+
+<!-- # Print nicely -->
+<!-- lapply(paths, function(p) cat(paste(p, collapse = ", "), "\n")) -->
+
+<!-- paths <- list( -->
+<!--   one_4  =  c(4, 3, 7, 5, 1, 6 ),  -->
+<!--   two_4 =   c(4, 3, 7, 5, 1, 10 ),  -->
+<!--   three_4 = c(4, 3, 7, 5, 1, 13 ),  -->
+<!--   four_4 = c(4, 3, 7, 5, 1, 14 ),  -->
+<!--   five_4 =  c(4, 3, 7, 5, 11, 2, 8 ),  -->
+<!--   six_4 =  c(4, 3, 7, 5, 11, 2, 9 ),  -->
+<!--   seven_4 = c(4, 3, 7, 5, 15 ) -->
+<!-- ) -->
+
+
+<!-- # for each path plot every each letter size -->
+<!-- cluster_letters_plots <- list(); for(path in paths){ -->
+
+<!--   plotting_d <- cluster_letter_means %>%  -->
+<!--     filter(my_cluster %in% path) %>%  -->
+<!--     mutate(my_cluster = factor(my_cluster, levels = path)) -->
+
+<!--   cluster_letter_plot <- ggplot(plotting_d, aes(x = my_cluster, y = value))+ -->
+<!--     # geom_violin(aes( color = my_cluster)) + -->
+<!--     geom_boxplot(aes( color = my_cluster), show.legend = FALSE) + -->
+<!--     geom_point(aes( color = my_cluster), alpha = .3, show.legend = FALSE)+ -->
+<!--     # geom_jitter(aes( color = my_cluster), alpha = .3)+ -->
+<!--     geom_smooth(method = "lm", aes(color = NULL, ,group = variable ),show.legend = FALSE)+ -->
+<!--     # geom_smooth(method = "loess", aes(color = NULL, ,group = variable ),show.legend = FALSE)+ -->
+<!--     facet_wrap(~variable)+ -->
+<!--     ggtitle(paste0(paste(path, collapse = "-"))) -->
+
+<!--   cluster_letters_plots[[paste(path, collapse = "-")]] <- cluster_letter_plot -->
+
+
+<!-- } -->
+
+<!-- cluster_letters_plots_grid <- patchwork::wrap_plots(cluster_letters_plots, ncol = 4) -->
+
+<!-- ggsave(paste0(VA_modeling_path, "letter_means_by_cluster_path_grid.png"),  -->
+<!--        cluster_letters_plots_grid, -->
+<!--        height = 10, width = 40 -->
+<!--        ) -->
+
+<!-- # For ACUIT --------- -->
+<!-- cluster_ACUIT <- d %>%  -->
+<!--   select(patID_eye, month, my_cluster, ACUIT) %>%  -->
+<!--   pivot_longer(cols = ACUIT, names_to = "variable")  -->
+
+
+
+<!-- # path = paths[["four"]] -->
+
+<!-- # for each path plot every each letter size -->
+<!-- cluster_ACUIT_plots <- list(); for(path in paths){ -->
+
+<!--   plotting_d <- cluster_ACUIT %>%  -->
+<!--     filter(my_cluster %in% path) %>%  -->
+<!--     mutate(my_cluster = factor(my_cluster, levels = path)) -->
+
+<!--   cluster_ACUIT_plot <- ggplot(plotting_d, aes(x = my_cluster, y = value))+ -->
+<!--     # geom_violin(aes( color = my_cluster)) + -->
+<!--     geom_boxplot(aes( color = my_cluster), show.legend = FALSE) + -->
+<!--     geom_point(aes( color = my_cluster), alpha = .3, show.legend = FALSE)+ -->
+<!--     # geom_jitter(aes( color = my_cluster), alpha = .3)+ -->
+<!--     geom_smooth(method = "lm", aes(color = NULL, ,group = variable ),show.legend = FALSE)+ -->
+<!--     # geom_smooth(method = "loess", aes(color = NULL, ,group = variable ),show.legend = FALSE)+ -->
+<!--     facet_wrap(~variable)+ -->
+<!--     ggtitle(paste0(paste(path, collapse = "-"))) -->
+
+<!--   cluster_ACUIT_plots[[paste(path, collapse = "-")]] <- cluster_ACUIT_plot -->
+
+
+<!-- } -->
+
+<!-- ggsave(paste0(VA_modeling_path, "ACUIT_by_cluster_path.png"),  -->
+<!--        marrangeGrob(cluster_ACUIT_plots %>% sapply(., ggplotGrob), ncol =4, nrow =2 ), -->
+<!--        height = 10, width = 40 -->
+<!--        ) -->
+
+<!-- ``` -->
+
+## see how rate correlates to factors when subsetting for each trajectory a -> b, b->c, etc.
+
+<!-- # $$ -->
+<!-- # * Rate for each cluster -->
+
+<!-- ```{r} -->
+
+
+
+
+<!-- ``` -->
+
+
+# ____   ___   ___   _____
+# modeling vision: ACUIT
+
+# value
+## Thickness
+
+### shape data
+```{r}
+
+response = "ACUIT"
+# subset d with vars of interest
+model_df <- d %>%
+  select(month, patID_eye, patID, SEXF, all_of(c(phenotypes, response)))
+
+# scale vars of interest, minus response: FA2_rate
+model_df[, phenotypes[phenotypes!=response] ] <- scale(model_df[, phenotypes[phenotypes!=response] ])
+
+
+```
+
+### model each variable against ACUIT rate, correcting for SEXF, and random effect of patient dependence
+```{r}
+
+# exclude the response variable, ACUIT_rate
+input_phenotypes <- setdiff( names(model_df), c("month","patID_eye", "patID", "SEXF",response))
+  
+# formulas
+form_strs <- paste0(response, " ~ ",input_phenotypes," + SEXF  + (1|patID) +  (1|patID_eye)")
+
+# for each variable in input_phenotypes, model FA_mean 
+results_list <- mclapply(form_strs, function(form_str){
+  ## linear model with random effects
+  formula <- as.formula(form_str)
+
+  fit <- try({lmer(formula = formula, data = model_df)})
+  
+  if(inherits(fit, "try-error")){
+    return(NA)
+  }else{
+    return(summary(fit))
+  }
+}, mc.cores = detectCores()-1)
+
+names(results_list) <- str_extract(form_strs, "\\S+\\s*~\\s*\\S+")
+
+names(results_list)[is.na(results_list)]
+# "OTHER_DISEASE" "SMKCIGSDAY"    "t2d"    
+
+# filter for models that worked
+results_list <- results_list[!is.na(results_list)]
+
+## make results df ####
+results_df <- extract_results(results_list)
+
+results_df <- results_df %>% 
+  filter(!grepl("(Intercept)|SEXF|month", Term))
+
+# filter for models that don't make sense
+results_df_filtered <- results_df %>% 
+  filter(!Term   %in% grep("RW|SNELL|LOGMA|SEX", results_df$Term, value = TRUE)) # exclude MT vars and zonal vars
+
+
+# volcano plot of vaa~phenotypes result
+ACUIT_by_phenos_volcano <-ggplot(results_df, aes(x = Estimate, y = -log10(q_value), color = Term))+
+      geom_point(show.legend = FALSE)+
+      geom_label_repel(aes(label = ifelse( q_value <= .05,  Term, NA)),
+                       size = 4,
+                       nudge_y = 0.5,
+                       show.legend = FALSE,
+                       max.overlaps = 20)+
+      geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+
+      geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+
+      theme_bw()+
+      # facet_wrap(~quintile, scales = "fixed")+
+      ggtitle("ACUIT ~ SEXF + phenotype_i + (1| patID) + (1|patID_eye)")
+
+ggsave(paste0(VA_modeling_path, "ACUIT_by_phenos_volcano.png"), ACUIT_by_phenos_volcano, width = 20, height = 12, dpi = 200)
+
+# volcano plot of vaa~phenotypes result
+ACUIT_by_phenos_volcano_filtered<- ggplot(results_df_filtered, aes(x = Estimate, y = -log10(q_value), color = Term))+
+      geom_point(show.legend = FALSE)+
+      geom_label_repel(aes(label = ifelse( q_value <= .05,  Term, NA)),
+                       size = 4,
+                       nudge_y = 0.5,
+                       show.legend = FALSE,
+                       max.overlaps = 20)+
+      geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+
+      geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+
+      theme_bw()+
+      # facet_wrap(~quintile, scales = "fixed")+
+      ggtitle("ACUIT ~ SEXF + phenotype_i + (1| patID) + (1|patID_eye)")
+
+ggsave(paste0(VA_modeling_path, "ACUIT_by_phenos_volcano_filtered.png"), ACUIT_by_phenos_volcano_filtered, width = 20, height = 12, dpi = 200)
+
+ACUIT_by_phenos_volcano_filtered_nominalP<- ggplot(results_df_filtered, aes(x = Estimate, y = -log10(`Pr(>|t|)`), color = Term))+
+      geom_point(show.legend = FALSE)+
+      geom_label_repel(aes(label = ifelse( `Pr(>|t|)` < .05,  Term, NA)),
+                       size = 4,
+                       # nudge_y = 0.5,
+                       show.legend = FALSE,
+                       max.overlaps = 20)+
+      geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+
+      geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+
+      theme_bw()+
+      # facet_wrap(~quintile, scales = "fixed")+
+      ggtitle("ACUIT ~ SEXF + phenotype_i + (1| patID) + (1|patID_eye)")
+
+h_w <- c(10,15) 
+ggsave(paste0(VA_modeling_path, "ACUIT_by_phenos_volcano_filtered_nominalP.png"), ACUIT_by_phenos_volcano_filtered_nominalP,  width = h_w[2], height = h_w[1], dpi = 200)
+
+
+# # add results to list
+# ACUIT_results_df_filtered <- results_df_MT_filtered
+# poster_results_dfs[["ACUIT_results_df_filtered"]] <- ACUIT_results_df_filtered
+
+
+
+```
+
+
+## Rate
+### Global Rate
+#### subset data to scale and model
+* filter out the ones with (rows>0) < 30
+```{r}
+
+
+response = "ACUIT_rate"
+# subset d with vars of interest 
+model_df <- d %>% 
+  select(month, patID_eye, patID, SEXF, all_of(c(phenotypes, response)))
+
+# scale vars of interest, minus response: FA2_rate
+model_df[, phenotypes[phenotypes!=response] ] <- scale(model_df[, phenotypes[phenotypes!=response] ])
+
+
+# make df of first visit phenotype values;  if first visit value @ phenotype is NA, grab first non-na, else, NA; exclude duplicated rows
+first_values_df <- model_df %>% 
+  select(-patID, - SEXF) %>% 
+  arrange(patID_eye, month) %>%  
+  group_by(patID_eye) %>%
+  mutate(across(everything(), 
+        ~dplyr::first(.[!is.na(.)]),
+        .names = "first_{.col}"
+  )) %>%
+  ungroup() %>%
+  select(-matches("month"), -matches("ACUIT_rate")) %>% 
+  select(patID_eye,  starts_with("first_")) %>% 
+  unique() %>% 
+  arrange(patID_eye)
+
+# filter out the firsts that don't make sense
+model_df_first <- model_df %>% 
+  arrange(patID_eye) %>% 
+  select(patID_eye, patID, SEXF, ACUIT_rate) %>% 
+  na.omit() %>%
+  unique() %>%  
+  left_join(., first_values_df)
+
+
+
+```
+
+#### model each variable against ACUIT rate, correcting for SEXF, and random effect of patient dependence
+> modeling rate by  patient's first phenotype does not have time effect, and therefore no repeated eye measures; but there are still repeated patients because each has two eyes
+
+```{r}
+
+# exclude the response variable, ACUIT_rate
+input_phenotypes <- setdiff( names(model_df_first), c("month","patID_eye", "patID", "SEXF",response))
+  
+# formulas
+form_strs <- paste0(response, " ~ ",input_phenotypes," + SEXF  + (1|patID)")
+
+# for each variable in input_phenotypes, model FA_mean 
+results_list <- mclapply(form_strs, function(form_str){
+  ## linear model with random effects
+  formula <- as.formula(form_str)
+
+  fit <- try({lmer(formula = formula, data = model_df_first)})
+  
+  if(inherits(fit, "try-error")){
+    return(NA)
+  }else{
+    return(summary(fit))
+  }
+}, mc.cores = detectCores()-1)
+
+names(results_list) <- str_extract(form_strs, "\\S+\\s*~\\s*\\S+")
+
+names(results_list)[is.na(results_list)]
+# "ACUIT_rate ~ first_OTHER_DISEASE" "ACUIT_rate ~ first_SMKCIGSDAY" "ACUIT_rate ~ first_t2d"
+
+# filter for models that worked
+results_list <- results_list[!is.na(results_list)]
+
+## make results df ####
+results_df <- extract_results(results_list)
+
+ACUIT_global_rate_results_df <- results_df
+
+results_df <- results_df %>% 
+  filter(!grepl("(Intercept)|SEXF|month", Term))
+
+# filter for models that don't make sense
+results_df_filtered <- results_df %>% 
+  filter(!Term   %in% grep("RW|SNELL|LOGMA|ACUIT|SEX", results_df$Term, value = TRUE)) # exclude MT vars and zonal vars
+
+
+# volcano plot of vaa~phenotypes result
+ACUIT_rate_by_phenos_volcano <-ggplot(results_df, aes(x = Estimate, y = -log10(q_value), color = Term))+
+      geom_point(show.legend = FALSE)+
+      geom_label_repel(aes(label = ifelse( q_value <= .05,  Term, NA)),
+                       size = 4,
+                       nudge_y = 0.5,
+                       show.legend = FALSE,
+                       max.overlaps = 20)+
+      geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+
+      geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+
+      theme_bw()+
+      # facet_wrap(~quintile, scales = "fixed")+
+      ggtitle("ACUIT_rate ~ SEXF + phenotype_i + (1| patID)")
+
+ggsave(paste0(VA_modeling_path, "ACUIT_rate_by_phenos_volcano.png"), ACUIT_rate_by_phenos_volcano, width = 20, height = 12, dpi = 200)
+
+
+# volcano plot of vaa~phenotypes result
+ACUIT_rate_by_phenos_volcano_filtered<- ggplot(results_df_filtered, aes(x = Estimate, y = -log10(q_value), color = Term))+
+      geom_point(show.legend = FALSE)+
+      geom_label_repel(aes(label = ifelse( q_value <= .05,  Term, NA)),
+                       size = 4,
+                       nudge_y = 0.5,
+                       show.legend = FALSE,
+                       max.overlaps = 20)+
+      geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+
+      geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+
+      theme_bw()+
+      # facet_wrap(~quintile, scales = "fixed")+
+      ggtitle("ACUIT_rate ~ SEXF + phenotype_i + (1| patID)")
+
+ggsave(paste0(VA_modeling_path, "ACUIT_rate_by_phenos_volcano_filtered.png"), ACUIT_rate_by_phenos_volcano_filtered, width = 20, height = 12, dpi = 200)
+
+ACUIT_rate_by_phenos_volcano_filtered_nominalP<- ggplot(results_df_filtered, aes(x = Estimate, y = -log10(`Pr(>|t|)`), color = Term))+
+      geom_point(show.legend = FALSE)+
+      geom_label_repel(aes(label = ifelse( `Pr(>|t|)` < .05,  Term, NA)),
+                       size = 4,
+                       # nudge_y = 0.5,
+                       show.legend = FALSE,
+                       max.overlaps = 20)+
+      geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+
+      geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+
+      theme_bw()+
+      # facet_wrap(~quintile, scales = "fixed")+
+      ggtitle("ACUIT_rate ~ SEXF + phenotype_i + (1| patID)")
+
+ggsave(paste0(VA_modeling_path, "ACUIT_rate_by_phenos_volcano_filtered_nominalP.png"), ACUIT_rate_by_phenos_volcano_filtered_nominalP,  width = h_w[2], height = h_w[1], dpi = 200)
+
+
+# # add results to list
+# ACUIT_rate_results_df_filtered <- results_df_MT_filtered
+# poster_results_dfs[["ACUIT_rate_results_df_filtered"]] <- ACUIT_rate_results_df_filtered
+
+
+
+```
+
+### Stepwise rate
+
+```{r stepwise var rate function}
+# ****** FUNCTION: calculate combination of each x with following x for each eye ******
+stepwise_rate <- function(a_eye, df = NULL, var = NA, time_var = "year") {
+    
+  if(is.na(var)) stop("Response NA. Please provide variable for calculate steppwise rate")
+  
+  
+  # Filter for eye of interest
+  a_eye_diff_d <- df[df$patID_eye == a_eye, ]
+  
+  if(time_var == "year"){
+    # make year var
+    if(!"year" %in% names(a_eye_diff_d)){
+      a_eye_diff_d <- a_eye_diff_d %>%
+        mutate(year = round(month/12, 2))
+    }
+    
+    # Create year to following year combinations
+    year_combos <- data.frame(year = a_eye_diff_d$year, post_year = lead(a_eye_diff_d$year)) 
+    
+    # Create var to every other var combinations
+    var_combos <- data.frame(var = a_eye_diff_d[[var]], post_var = lead(a_eye_diff_d[[var]])) 
+      
+    # Time pp combinations
+    year_var_combos <- cbind(year_combos, var_combos)
+    
+    # make rate for each i to i+1: change in var over change in time>> postx-x/postyear-year
+    year_var_combos$var_rate <- with(year_var_combos , (post_var-var)/(post_year-year))
+    
+    # Join back to dataset
+    a_eye_diff_d <- suppressMessages(
+      a_eye_diff_d %>% 
+        left_join(year_var_combos, by = c("year")) 
+      )
+    
+    # remove functional vars
+    a_eye_diff_d$var <- NULL
+    a_eye_diff_d$post_year <- NULL
+    a_eye_diff_d$post_var <- NULL
+    
+    
+    # rename "var" to var
+    names(a_eye_diff_d) <- str_replace_all(names(a_eye_diff_d), "var", var)
+  } 
+    
+  if(time_var == "month"){
+    
+    # Create month to following month combinations
+    month_combos <- data.frame(month = a_eye_diff_d$month, post_month = lead(a_eye_diff_d$month)) 
+    
+    # Create var to every other var combinations
+    var_combos <- data.frame(var = a_eye_diff_d[[var]], post_var = lead(a_eye_diff_d[[var]])) 
+      
+    # Time pp combinations
+    month_var_combos <- cbind(month_combos, var_combos)
+    
+    # make rate for each i to i+1: change in var over change in time>> postx-x/postmonth-month
+    month_var_combos$var_rate <- with(month_var_combos , (post_var-var)/(post_month-month))
+    
+    # Join back to dataset
+    a_eye_diff_d <- suppressMessages(
+      a_eye_diff_d %>% 
+        left_join(month_var_combos, by = c("month")) 
+      )
+    
+    # remove functional vars
+    a_eye_diff_d$var <- NULL
+    a_eye_diff_d$post_month <- NULL
+    a_eye_diff_d$post_var <- NULL
+    
+    
+    # rename "var" to var
+    names(a_eye_diff_d) <- str_replace_all(names(a_eye_diff_d), "var", var)
+  }
+  
+  return(a_eye_diff_d)
+}
+```
+
+#### data
+* filter out the ones with (rows>0) < 30
+```{r}
+
+var <- "ACUIT"
+# subset d with vars of interest 
+model_df <- d %>% 
+  select(month, patID_eye, patID, SEXF, all_of(c(phenotypes, var)))
+
+# scale vars of interest, minus response: FA2_rate
+model_df[, phenotypes[phenotypes!=var] ] <- scale(model_df[, phenotypes[phenotypes!=var] ])
+
+
+model_df_lag <- mclapply(unique(model_df$patID_eye), function(x) stepwise_rate(x, df = model_df,  var = var, time_var = "month"), mc.cores = detectCores()-1) %>% 
+  do.call(rbind,.)
+
+response = sprintf("%s_rate", var)
+
+```
+
+#### model 
+
+```{r}
+
+# exclude the response variable, ACUIT_rate
+input_phenotypes <- setdiff( names(model_df_lag), c("month","patID_eye", "patID", "SEXF",response, var, "year"))
+  
+# formulas
+form_strs <- paste0(response, " ~ ",input_phenotypes," + SEXF  + (1|patID) + (1|patID_eye)")
+# form_strs <- paste0(response, " ~ ",input_phenotypes," + SEXF  + (1|patID) ")
+
+# for each variable in input_phenotypes, model FA_mean 
+results_list <- mclapply(form_strs, function(form_str){
+  ## linear model with random effects
+  formula <- as.formula(form_str)
+
+  fit <- try({lmer(formula = formula, data = model_df_lag)})
+  
+  if(inherits(fit, "try-error")){
+    return(NA)
+  }else{
+    return(summary(fit))
+  }
+}, mc.cores = detectCores()-1)
+
+names(results_list) <- str_extract(form_strs, "\\S+\\s*~\\s*\\S+")
+
+names(results_list)[is.na(results_list)]
+# "ACUIT_rate ~ first_OTHER_DISEASE" "ACUIT_rate ~ first_SMKCIGSDAY" "ACUIT_rate ~ first_t2d"
+
+# filter for models that worked
+results_list <- results_list[!is.na(results_list)]
+
+## make results df ####
+results_df <- extract_results(results_list)
+
+ACUIT_stepwise_rate_results_df <- results_df
+
+results_df <- results_df %>% 
+  filter(!grepl("(Intercept)|SEXF|month", Term))
+
+# filter for models that don't make sense
+results_df_filtered <- results_df %>% 
+  filter(!Term   %in% grep("RW|SNEL|LOGM|SEX|SEX", results_df$Term, value = TRUE)) # exclude MT vars and zonal vars
+
+
+# volcano plot of vaa~phenotypes result
+ACUIT_rate_by_phenos_volcano <-ggplot(results_df, aes(x = Estimate, y = -log10(q_value), color = Term))+
+      geom_point(show.legend = FALSE)+
+      geom_label_repel(aes(label = ifelse( q_value <= .05,  Term, NA)),
+                       size = 4,
+                       nudge_y = 0.5,
+                       show.legend = FALSE,
+                       max.overlaps = 20)+
+      geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+
+      geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+
+      theme_bw()+
+      # facet_wrap(~quintile, scales = "fixed")+
+      ggtitle("stepwise_ACUIT_rate ~ SEXF + phenotype_i + (1| patID) + (1|patID_eye)")
+
+ggsave(paste0(VA_modeling_path, "ACUIT_stepwise_lag_rate_by_phenos_volcano.png"), ACUIT_rate_by_phenos_volcano, width = 20, height = 12, dpi = 200)
+
+# volcano plot of vaa~phenotypes result
+ACUIT_rate_by_phenos_volcano_filtered<- ggplot(results_df_filtered, aes(x = Estimate, y = -log10(q_value), color = Term))+
+      geom_point(show.legend = FALSE)+
+      geom_label_repel(aes(label = ifelse( q_value <= .05,  Term, NA)),
+                       size = 4,
+                       nudge_y = 0.5,
+                       show.legend = FALSE,
+                       max.overlaps = 20)+
+      geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+
+      geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+
+      theme_bw()+
+      # facet_wrap(~quintile, scales = "fixed")+
+      ggtitle("stepwise_ACUIT_rate ~ SEXF + phenotype_i + (1| patID) + (1|patID_eye)")
+
+ggsave(paste0(VA_modeling_path, "ACUIT_stepwise_lag_rate_by_phenos_volcano_filtered.png"), ACUIT_rate_by_phenos_volcano_filtered, width = 20, height = 12, dpi = 200)
+
+ACUIT_rate_by_phenos_volcano_filtered_nominalP<- ggplot(results_df_filtered, aes(x = Estimate, y = -log10(`Pr(>|t|)`), color = Term))+
+      geom_point(show.legend = FALSE)+
+      geom_label_repel(aes(label = ifelse( `Pr(>|t|)` < .05,  Term, NA)),
+                       size = 4,
+                       # nudge_y = 0.5,
+                       show.legend = FALSE,
+                       max.overlaps = 20)+
+      geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+
+      geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+
+      theme_bw()+
+      # facet_wrap(~quintile, scales = "fixed")+
+      ggtitle("stepwise_ACUIT_rate ~ SEXF + phenotype_i + (1| patID) + (1|patID_eye)")
+
+ggsave(paste0(VA_modeling_path, "ACUIT_stepwise_lag_rate_by_phenos_volcano_filtered_nominalP.png"), ACUIT_rate_by_phenos_volcano_filtered_nominalP,  width = h_w[2], height = h_w[1], dpi = 200)
+
+
+
+```
+
+
+### compare global to stepwise
+```{r}
+
+fun <- function(x){
+x %>% 
+  mutate(Term = str_remove_all(Term, "first_")) %>% 
+  select(Term, `Pr(>|t|)`) %>% 
+  mutate(neglogP = -log10(`Pr(>|t|)`)) %>% 
+  select(-`Pr(>|t|)`) %>% 
+  filter(!grepl("Intercept|SEX", Term))
+}
+
+inner_join(fun(ACUIT_global_rate_results_df), fun(ACUIT_stepwise_rate_results_df), by = "Term", suffix = c("_global", "_stepwise")) %>% 
+  column_to_rownames("Term") %>% 
+  mutate_all(~-log10(.)) %>% 
+  plot()
+
+abline(a = 0, b = 1)
+
+```
+
+# ____   ___   ___   _____
+
+# modeling thickness 
+
+<!-- ## MT5 thickness -->
+<!-- ### subset data to scale and model -->
+<!-- * filter out the ones with (rows>0) < 30 -->
+<!-- ```{r} -->
+
+<!-- # #  variables (rows of value>0) < 30 where MT05 present -->
+<!-- # m <- d[!is.na(d$MT05),phenotypes] != 0 -->
+<!-- # vars <- m %>% -->
+<!-- #   colSums(., na.rm = TRUE) -->
+<!-- # -->
+<!-- # # variables with > 30 obs of value>0 -->
+<!-- # deviant_vars <- vars[vars > 30] %>% names() -->
+<!-- # -->
+<!-- # # how many unique months do these have where FA_mean and var available? -->
+<!-- # count_unq_months <-  sapply(deviant_vars, function(x){ -->
+<!-- #                     # how many unique months where both mr and var available? -->
+<!-- #                     return( d $month[!is.na(d$MT05) & !is.na(d[,x])] %>% -->
+<!-- #                              unique() %>% -->
+<!-- #                              length() -->
+<!-- #                             ) -->
+<!-- #                   }) -->
+<!-- # # vars with greater than one unique month observed -->
+<!-- # MT5_greater_than_one_month <- count_unq_months[count_unq_months>1] %>% -->
+<!-- #   names() -->
+
+<!-- # setdiff(deviant_vars ,greater_than_one_month  ) # "BLRPATTERN"  "NOABNORMFAF" only have 1 month of observations where >30 records of rows of value > 0 -->
+
+<!-- response = "MT05" -->
+<!-- # subset d with vars of interest -->
+<!-- model_df <- d %>% -->
+<!--   select(month, patID_eye, patID, SEXF, all_of(c(phenotypes, response))) -->
+
+<!-- # scale vars of interest, minus response: FA2_rate -->
+<!-- model_df[, phenotypes[phenotypes!=response] ] <- scale(model_df[, phenotypes[phenotypes!=response] ]) -->
+
+
+<!-- ``` -->
+
+<!-- ### model each variable against MT5 correcting for SEXF, and random effect of patient dependence -->
+<!-- > modeling rate by  patient's first phenotype does not have time effect, and therefore no repeated eye measures; but there are still repeated patients because each has two eyes -->
+
+<!-- ```{r} -->
+
+<!-- # exclude the response variable, mt5 -->
+<!-- input_phenotypes <- names(model_df)[!names(model_df) %in% c("month","patID_eye", "patID", "SEXF", "MT05")] -->
+
+<!-- # formulas -->
+<!-- form_strs <- paste0(response, " ~ ",input_phenotypes," + SEXF  + (1|patID) + (1|patID_eye)") -->
+
+<!-- # for each variable in input_phenotypes, model FA_mean  -->
+<!-- results_list <- mclapply(form_strs, function(form_str){ -->
+
+<!--   ## linear model with random effects -->
+<!--   re_formula <- as.formula(form_str) -->
+
+<!--   fit <- try({lmer(formula = re_formula, data = model_df)}) -->
+
+<!--   return(summary(fit)) -->
+
+<!-- }, mc.cores = detectCores()-1) -->
+
+<!-- names(results_list) <- sub("\\s\\+.*", "", form_strs) -->
+
+<!-- # filter for models that worked -->
+<!-- results_list <- results_list[unlist(lapply(results_list, function(x) !all(class(x) %in% c("summaryDefault", "table"))))] -->
+
+<!-- ## make results df #### -->
+<!-- results_df <- extract_results(results_list) -->
+
+<!-- results_df <- results_df %>%  -->
+<!--   filter(!Term %in% c("(Intercept)", "SEXF", "month")) -->
+
+<!-- # filter for models that don't make sense -->
+<!-- results_df_filtered <- results_df %>%  -->
+<!--   filter(!Term   %in% grep("avg|MT0|_.*0\\d$|MICRON|SEX", results_df$Term, value = TRUE)) # exclude MT vars and zonal vars -->
+
+<!-- # volcano plot of vaa~phenotypes result -->
+<!-- MT5_by_phenos_volcano <-ggplot(results_df, aes(x = Estimate, y = -log10(q_value), color = Term))+ -->
+<!--       geom_point(show.legend = FALSE)+ -->
+<!--       geom_label_repel(aes(label = ifelse( q_value <= .05,  Term, NA)), -->
+<!--                        size = 4, -->
+<!--                        nudge_y = 0.5, -->
+<!--                        show.legend = FALSE, -->
+<!--                        max.overlaps = 20)+ -->
+<!--       geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+ -->
+<!--       geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+ -->
+<!--       theme_bw()+ -->
+<!--       # facet_wrap(~quintile, scales = "fixed")+ -->
+<!--       ggtitle("MT5 ~ SEXF + phenotype_i + (1| patID_eye) + (1|patID)") -->
+
+<!-- ggsave(paste0(MT_modeling_path, "MT5_by_phenos_volcano.png"), MT5_by_phenos_volcano, width = 20, height = 12, dpi = 200) -->
+
+<!-- MT5_by_phenos_volcano_filtered <-ggplot(results_df_filtered , aes(x = Estimate, y = -log10(q_value), color = Term))+ -->
+<!--       geom_point(show.legend = FALSE)+ -->
+<!--       geom_label_repel(aes(label = ifelse( q_value <= .05,  Term, NA)), -->
+<!--                        size = 4, -->
+<!--                        nudge_y = 0.5, -->
+<!--                        show.legend = FALSE, -->
+<!--                        max.overlaps = 20)+ -->
+<!--       geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+ -->
+<!--       geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+ -->
+<!--       theme_bw()+ -->
+<!--       # facet_wrap(~quintile, scales = "fixed")+ -->
+<!--       ggtitle("MT5 ~ SEXF + phenotype_i + (1| patID_eye) + (1|patID)") -->
+
+<!-- ggsave(paste0(MT_modeling_path, "MT5_by_phenos_volcano_filtered.png"), MT5_by_phenos_volcano_filtered, width = 20, height = 12, dpi = 200) -->
+
+<!-- ``` -->
+
+
+<!-- ## MT5 rate -->
+<!-- ### subset data to scale and model -->
+<!-- * filter for the vars with (rows>0) > 30 -->
+<!-- ```{r} -->
+
+<!-- # #  variables (rows of value != 0) where MT05_rate present -->
+<!-- # m <- d[!is.na(d$MT05_rate),phenotypes] != 0 -->
+<!-- #  -->
+<!-- # # how many of each var is not 0 -->
+<!-- # vars <- m %>% -->
+<!-- #   colSums(., na.rm = TRUE) -->
+<!-- #  -->
+<!-- # # variables with > 30 obs of value>0 -->
+<!-- # powered_vars <- vars[vars > 30] %>% names() -->
+<!-- #  -->
+<!-- # # how many unique months do these have where FA_mean and var available? -->
+<!-- # count_unq_months <-  sapply(powered_vars, function(x){ -->
+<!-- #                      -->
+<!-- #                     # how many unique months where both response variable and var available? -->
+<!-- #                     return( d$month[!is.na(d$MT05_rate) & !is.na(d[,x])] %>% -->
+<!-- #                              unique() %>% -->
+<!-- #                              length() -->
+<!-- #                             ) -->
+<!-- #                   }) -->
+<!-- #  -->
+<!-- # # vars with greater than one unique month observed -->
+<!-- # MT5_rate_greater_than_one_month <- count_unq_months[count_unq_months>1] %>% -->
+<!-- #   names() -->
+
+
+
+<!-- # # subset d with vars of interest -->
+<!-- # model_df <- d %>% -->
+<!-- #   select(month, patID_eye, patID, SEXF, all_of(MT5_rate_greater_than_one_month)) -->
+<!-- #  -->
+<!-- # # scale vars of interest -->
+<!-- # model_df[, MT5_rate_greater_than_one_month] <- scale(model_df[, MT5_rate_greater_than_one_month]) -->
+
+
+<!-- # subset d with vars of interest -->
+
+<!-- response = "MT05_rate" -->
+<!-- # subset d with vars of interest  -->
+<!-- model_df <- d %>%  -->
+<!--   select(month, patID_eye, patID, SEXF, all_of(c(phenotypes, response))) -->
+
+<!-- # scale vars of interest, minus response: FA2_rate -->
+<!-- model_df[, phenotypes[phenotypes!=response] ] <- scale(model_df[, phenotypes[phenotypes!=response] ]) -->
+
+
+<!-- # # reduce model_df to patient's rate and first_visit phenotype value -->
+<!-- # model_df_first <- model_df %>%  -->
+<!-- #   arrange(month) %>%   -->
+<!-- #   group_by(patID_eye) %>% -->
+<!-- #   # summarize(across( -->
+<!-- #   #   .cols = !c("patID_eye", "month", "SEXF"),  -->
+<!-- #   #   .fns = ~dplyr::first(.), -->
+<!-- #   #   .names  = "first_{.col}") -->
+<!-- #   #   ) %>% -->
+<!-- #   mutate(across( -->
+<!-- #     everything(),  -->
+<!-- #     ~dplyr::first(.), -->
+<!-- #     .names  = "first_{.col}" -->
+<!-- #     ))  -->
+<!-- #  -->
+<!-- # # select columns for modeling -->
+<!-- # model_df_first_filtered <- model_df_first %>%  -->
+<!-- #   select( patID_eye, patID, SEXF, MT05_rate, starts_with("first")) %>%    -->
+<!-- #   select(!matches("0[12346789]_rate")) %>% # exclude MT rates -->
+<!-- #   select(!c("first_SEXF", "first_month", "first_patID")) %>%  -->
+<!-- #   unique() -->
+
+<!-- # make df of first visit phenotype values;  if first visit value @ phenotype is NA, grab first non-na, else, NA; exclude duplicated rows -->
+<!-- first_values_df <- model_df %>%  -->
+<!--   select(-patID, - SEXF) %>%  -->
+<!--   arrange(patID_eye, month) %>%   -->
+<!--   group_by(patID_eye) %>% -->
+<!--   mutate( -->
+<!--     across( -->
+<!--         everything(),  -->
+<!--         ~dplyr::first(.[!is.na(.)]), -->
+<!--         .names = "first_{.col}" -->
+<!--   )) %>% -->
+<!--   ungroup() %>% -->
+<!--   select(-matches("month"), -matches("MT05_rate")) %>%  -->
+<!--   select(patID_eye,  starts_with("first_")) %>%  -->
+<!--   unique() %>%  -->
+<!--   arrange(patID_eye) -->
+
+<!-- # filter out the firsts that don't make sense -->
+<!-- model_df_first <- model_df %>%  -->
+<!--   arrange(patID_eye) %>%  -->
+<!--   select(patID_eye, patID, SEXF, MT05_rate) %>%  -->
+<!--   na.omit() %>% -->
+<!--   unique() %>%   -->
+<!--   left_join(., first_values_df) -->
+
+
+
+
+<!-- ``` -->
+
+<!-- ### model each variable against MT5 correcting for SEXF, and random effect of patient dependence -->
+<!-- > modeling rate by  patient's first phenotype does not have time effect, and therefore no repeated eye measures; but there are still repeated patients because each has two eyes -->
+
+<!-- ```{r} -->
+
+
+<!-- # exclude the response variable, mt5 rate -->
+<!-- input_phenotypes <- names(model_df)[!names(model_df) %in% c("month","patID_eye", "patID", "SEXF", "MT05_rate")] -->
+
+<!-- # formulas -->
+<!-- form_strs <- paste0(response, " ~ ",input_phenotypes," + SEXF  + (1|patID)") -->
+
+<!-- # for each variable in input_phenotypes, model FA_mean  -->
+<!-- results_list <- mclapply(form_strs, function(form_str){ -->
+
+<!--   ## linear model with random effects -->
+<!--   re_formula <- as.formula(form_str) -->
+
+<!--   fit <- try({lmer(formula = re_formula, data = model_df)}) -->
+
+<!--   return(summary(fit)) -->
+
+<!-- }, mc.cores = detectCores()-1) -->
+
+<!-- names(results_list) <- sub("\\s\\+.*", "", form_strs) -->
+
+<!-- # filter for models that worked -->
+<!-- results_list <- results_list[unlist(lapply(results_list, function(x) !all(class(x) %in% c("summaryDefault", "table"))))] -->
+
+<!-- ## make results df #### -->
+<!-- results_df <- extract_results(results_list) -->
+
+<!-- results_df <- results_df %>%  -->
+<!--   filter(!Term %in% c("(Intercept)", "SEXF", "month")) -->
+
+<!-- # filter for models that don't make sense -->
+<!-- results_df_filtered <- results_df %>%  -->
+<!--   filter(!Term   %in% grep("avg|MT0|_.*0\\d$|MICRON|SEX", results_df$Term, value = TRUE)) # exclude MT vars and zonal vars -->
+
+<!-- # volcano plot of vaa~phenotypes result -->
+<!-- MT5_rate_by_phenos_volcano <-ggplot(results_df, aes(x = Estimate, y = -log10(q_value), color = Model))+ -->
+<!--       geom_point(show.legend = FALSE)+ -->
+<!--       geom_label_repel(aes(label = ifelse( q_value <= .05,  Model, NA)), -->
+<!--                        size = 4, -->
+<!--                        nudge_y = 0.5, -->
+<!--                        show.legend = FALSE, -->
+<!--                        max.overlaps = 20)+ -->
+<!--       geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+ -->
+<!--       geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+ -->
+<!--       theme_bw()+ -->
+<!--       # facet_wrap(~quintile, scales = "fixed")+ -->
+<!--       ggtitle("MT5_rate ~ SEXF + phenotype_i + (1| patID_eye) + (1|patID)") -->
+
+<!-- ggsave(paste0(MT_modeling_path, "MT5_rate_by_phenos_volcano.png"), MT5_rate_by_phenos_volcano, width = 20, height = 12, dpi = 200) -->
+
+<!-- MT5_rate_by_phenos_volcano_filtered<-ggplot(results_df_filtered, aes(x = Estimate, y = -log10(q_value), color = Model))+ -->
+<!--       geom_point(show.legend = FALSE)+ -->
+<!--       geom_label_repel(aes(label = ifelse( q_value <= .05,  Model, NA)), -->
+<!--                        size = 4, -->
+<!--                        nudge_y = 0.5, -->
+<!--                        show.legend = FALSE, -->
+<!--                        max.overlaps = 20)+ -->
+<!--       geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+ -->
+<!--       geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+ -->
+<!--       theme_bw()+ -->
+<!--       # facet_wrap(~quintile, scales = "fixed")+ -->
+<!--       ggtitle("MT5_rate ~ SEXF + phenotype_i + (1| patID_eye) + (1|patID)") -->
+
+<!-- ggsave(paste0(MT_modeling_path, "MT5_rate_by_phenos_volcano_filtered.png"), MT5_rate_by_phenos_volcano_filtered, width = 20, height = 12, dpi = 200) -->
+
+<!-- MT5_rate_by_phenos_volcano_filtered_nominalP <-ggplot(results_df_filtered, aes(x = Estimate, y = -log10(`Pr(>|t|)`), color = Model))+ -->
+<!--       geom_point(show.legend = FALSE)+ -->
+<!--       geom_label_repel(aes(label = ifelse(`Pr(>|t|)`< .05,  Model, NA)), -->
+<!--                        size = 4, -->
+<!--                        nudge_y = 0.5, -->
+<!--                        show.legend = FALSE, -->
+<!--                        max.overlaps = 20)+ -->
+<!--       geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+ -->
+<!--       geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+ -->
+<!--       theme_bw()+ -->
+<!--       # facet_wrap(~quintile, scales = "fixed")+ -->
+<!--       ggtitle("MT5_rate ~ SEXF + phenotype_i + (1| patID_eye) + (1|patID)") -->
+
+<!-- ggsave(paste0(MT_modeling_path, "MT5_rate_by_phenos_volcano_filtered_nominalP.png"), MT5_rate_by_phenos_volcano_filtered_nominalP , width = 20, height = 12, dpi = 200) -->
+
+
+
+
+
+<!-- ``` -->
+
+
+
+# Parafovea
+
+## Thickness
+
+### shape data
+```{r}
+
+response = "parafovea"
+# subset d with vars of interest
+model_df <- d %>%
+  select(month, patID_eye, patID, SEXF, all_of(c(phenotypes, response)))
+
+# scale vars of interest, minus response: FA2_rate
+model_df[, phenotypes[phenotypes!=response] ] <- scale(model_df[, phenotypes[phenotypes!=response] ])
+
+
+```
+
+### model each variable against parafovea rate, correcting for SEXF, and random effect of patient dependence
+```{r}
+
+# exclude the response variable, parafovea_rate
+input_phenotypes <- setdiff( names(model_df), c("month","patID_eye", "patID", "SEXF",response))
+  
+# formulas
+form_strs <- paste0(response, " ~ ",input_phenotypes," + SEXF  + (1|patID) +  (1|patID_eye)")
+
+# for each variable in input_phenotypes, model FA_mean 
+results_list <- mclapply(form_strs, function(form_str){
+  ## linear model with random effects
+  formula <- as.formula(form_str)
+
+  fit <- try({lmer(formula = formula, data = model_df)})
+  
+  if(inherits(fit, "try-error")){
+    return(NA)
+  }else{
+    return(summary(fit))
+  }
+}, mc.cores = detectCores()-1)
+
+names(results_list) <- str_extract(form_strs, "\\S+\\s*~\\s*\\S+")
+
+names(results_list)[is.na(results_list)]
+# "OTHER_DISEASE" "SMKCIGSDAY"    "t2d"    
+
+# filter for models that worked
+results_list <- results_list[!is.na(results_list)]
+
+## make results df ####
+results_df <- extract_results(results_list)
+
+results_df <- results_df %>% 
+  filter(!grepl("(Intercept)|SEXF|month", Term))
+
+# filter for models that don't make sense
+results_df_filtered <- results_df %>% 
+  filter(!Term   %in% grep("avg|MT0|_.*0\\d$|MICRON|FOVTHICK|SEX", results_df$Term, value = TRUE)) # exclude MT vars and zonal vars
+
+
+# volcano plot of vaa~phenotypes result
+parafovea_by_phenos_volcano <-ggplot(results_df, aes(x = Estimate, y = -log10(q_value), color = Term))+
+      geom_point(show.legend = FALSE)+
+      geom_label_repel(aes(label = ifelse( q_value <= .05,  Term, NA)),
+                       size = 4,
+                       nudge_y = 0.5,
+                       show.legend = FALSE,
+                       max.overlaps = 20)+
+      geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+
+      geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+
+      theme_bw()+
+      # facet_wrap(~quintile, scales = "fixed")+
+      ggtitle("parafovea ~ SEXF + phenotype_i + (1| patID) + (1|patID_eye)")
+
+ggsave(paste0(MT_modeling_path, "parafovea_by_phenos_volcano.png"), parafovea_by_phenos_volcano, width = 20, height = 12, dpi = 200)
+
+# volcano plot of vaa~phenotypes result
+parafovea_by_phenos_volcano_MT_filtered<- ggplot(results_df_filtered, aes(x = Estimate, y = -log10(q_value), color = Term))+
+      geom_point(show.legend = FALSE)+
+      geom_label_repel(aes(label = ifelse( q_value <= .05,  Term, NA)),
+                       size = 4,
+                       nudge_y = 0.5,
+                       show.legend = FALSE,
+                       max.overlaps = 20)+
+      geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+
+      geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+
+      theme_bw()+
+      # facet_wrap(~quintile, scales = "fixed")+
+      ggtitle("parafovea ~ SEXF + phenotype_i + (1| patID) + (1|patID_eye)")
+
+ggsave(paste0(MT_modeling_path, "parafovea_by_phenos_volcano_MT_filtered.png"), parafovea_by_phenos_volcano_MT_filtered, width = 20, height = 12, dpi = 200)
+
+parafovea_by_phenos_volcano_MT_filtered_nominalP<- ggplot(results_df_filtered, aes(x = Estimate, y = -log10(`Pr(>|t|)`), color = Term))+
+      geom_point(show.legend = FALSE)+
+      geom_label_repel(aes(label = ifelse( `Pr(>|t|)` < .05,  Term, NA)),
+                       size = 4,
+                       # nudge_y = 0.5,
+                       show.legend = FALSE,
+                       max.overlaps = 20)+
+      geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+
+      geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+
+      theme_bw()+
+      # facet_wrap(~quintile, scales = "fixed")+
+      ggtitle("parafovea ~ SEXF + phenotype_i + (1| patID) + (1|patID_eye)")
+
+
+ggsave(paste0(MT_modeling_path, "parafovea_by_phenos_volcano_MT_filtered_nominalP.png"), parafovea_by_phenos_volcano_MT_filtered_nominalP,  width = h_w[2], height = h_w[1], dpi = 200)
+
+
+# # add results to list
+# parafovea_results_df_filtered <- results_df_MT_filtered
+# poster_results_dfs[["parafovea_results_df_filtered"]] <- parafovea_results_df_filtered
+
+
+
+```
+
+
+## Rate
+### Global rate
+#### subset data to scale and model
+* filter out the ones with (rows>0) < 30
+```{r}
+
+
+response = "parafovea_rate"
+# subset d with vars of interest 
+model_df <- d %>% 
+  select(month, patID_eye, patID, SEXF, all_of(c(phenotypes, response)))
+
+# scale vars of interest, minus response: FA2_rate
+model_df[, phenotypes[phenotypes!=response] ] <- scale(model_df[, phenotypes[phenotypes!=response] ])
+
+
+# make df of first visit phenotype values;  if first visit value @ phenotype is NA, grab first non-na, else, NA; exclude duplicated rows
+first_values_df <- model_df %>% 
+  select(-patID, - SEXF) %>% 
+  arrange(patID_eye, month) %>%  
+  group_by(patID_eye) %>%
+  mutate(across(everything(), 
+        ~dplyr::first(.[!is.na(.)]),
+        .names = "first_{.col}"
+  )) %>%
+  ungroup() %>%
+  select(-matches("month"), -matches("parafovea_rate")) %>% 
+  select(patID_eye,  starts_with("first_")) %>% 
+  unique() %>% 
+  arrange(patID_eye)
+
+# filter out the firsts that don't make sense
+model_df_first <- model_df %>% 
+  arrange(patID_eye) %>% 
+  select(patID_eye, patID, SEXF, parafovea_rate) %>% 
+  na.omit() %>%
+  unique() %>%  
+  left_join(., first_values_df)
+
+
+```
+
+#### model each variable against parafovea rate, correcting for SEXF, and random effect of patient dependence
+> modeling rate by  patient's first phenotype does not have time effect, and therefore no repeated eye measures; but there are still repeated patients because each has two eyes
+
+```{r}
+
+# exclude the response variable, parafovea_rate
+input_phenotypes <- setdiff( names(model_df_first), c("month","patID_eye", "patID", "SEXF",response))
+  
+# formulas
+form_strs <- paste0(response, " ~ ",input_phenotypes," + SEXF  + (1|patID)")
+
+# for each variable in input_phenotypes, model FA_mean 
+results_list <- mclapply(form_strs, function(form_str){
+  ## linear model with random effects
+  formula <- as.formula(form_str)
+
+  fit <- try({lmer(formula = formula, data = model_df_first)})
+  
+  if(inherits(fit, "try-error")){
+    return(NA)
+  }else{
+    return(summary(fit))
+  }
+}, mc.cores = detectCores()-1)
+
+names(results_list) <- str_extract(form_strs, "\\S+\\s*~\\s*\\S+")
+
+names(results_list)[is.na(results_list)]
+# "parafovea_rate ~ first_OTHER_DISEASE" "parafovea_rate ~ first_SMKCIGSDAY" "parafovea_rate ~ first_t2d"
+
+# filter for models that worked
+results_list <- results_list[!is.na(results_list)]
+
+## make results df ####
+results_df <- extract_results(results_list)
+
+parafovea_global_results_df <- results_df
+
+results_df <- results_df %>% 
+  filter(!grepl("(Intercept)|SEXF|month", Term))
+
+# filter for models that don't make sense
+results_df_filtered <- results_df %>% 
+  filter(!Term   %in% grep("avg|MT0|_.*0\\d$|MICRON|FOVTHICK|SEX", results_df$Term, value = TRUE)) # exclude MT vars and zonal vars
+
+
+# volcano plot of vaa~phenotypes result
+parafovea_rate_by_phenos_volcano <-ggplot(results_df, aes(x = Estimate, y = -log10(q_value), color = Term))+
+      geom_point(show.legend = FALSE)+
+      geom_label_repel(aes(label = ifelse( q_value <= .05,  Term, NA)),
+                       size = 4,
+                       nudge_y = 0.5,
+                       show.legend = FALSE,
+                       max.overlaps = 20)+
+      geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+
+      geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+
+      theme_bw()+
+      # facet_wrap(~quintile, scales = "fixed")+
+      ggtitle("parafovea_rate ~ SEXF + phenotype_i + (1| patID)")
+
+ggsave(paste0(MT_modeling_path, "parafovea_rate_by_phenos_volcano.png"), parafovea_rate_by_phenos_volcano, width = 20, height = 12, dpi = 200)
+
+# # volcano plot of vaa~phenotypes result
+# parafovea_rate_by_phenos_volcano_otherZones_filtered<- ggplot(results_df_otherZones_filtered, aes(x = Estimate, y = -log10(q_value), color = Term))+
+#       geom_point(show.legend = FALSE)+
+#       geom_label_repel(aes(label = ifelse( q_value <= .05,  Term, NA)),
+#                        size = 4,
+#                        nudge_y = 0.5,
+#                        show.legend = FALSE,
+#                        max.overlaps = 20)+
+#       geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+
+#       geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+
+#       theme_bw()+
+#       # facet_wrap(~quintile, scales = "fixed")+
+#       ggtitle("parafovea_rate ~ SEXF + phenotype_i + (1| patID)")
+# 
+# ggsave(paste0(MT_modeling_path, "parafovea_rate_by_phenos_volcano_otherZones_filtered.png"), parafovea_rate_by_phenos_volcano_otherZones_filtered, width = 20, height = 12, dpi = 200)
+
+# volcano plot of vaa~phenotypes result
+parafovea_rate_by_phenos_volcano_MT_filtered<- ggplot(results_df_filtered, aes(x = Estimate, y = -log10(q_value), color = Term))+
+      geom_point(show.legend = FALSE)+
+      geom_label_repel(aes(label = ifelse( q_value <= .05,  Term, NA)),
+                       size = 4,
+                       nudge_y = 0.5,
+                       show.legend = FALSE,
+                       max.overlaps = 20)+
+      geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+
+      geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+
+      theme_bw()+
+      # facet_wrap(~quintile, scales = "fixed")+
+      ggtitle("parafovea_rate ~ SEXF + phenotype_i + (1| patID)")
+
+ggsave(paste0(MT_modeling_path, "parafovea_rate_by_phenos_volcano_MT_filtered.png"), parafovea_rate_by_phenos_volcano_MT_filtered, width = 20, height = 12, dpi = 200)
+
+parafovea_rate_by_phenos_volcano_MT_filtered_nominalP<- ggplot(results_df_filtered, aes(x = Estimate, y = -log10(`Pr(>|t|)`), color = Term))+
+      geom_point(show.legend = FALSE)+
+      geom_label_repel(aes(label = ifelse( `Pr(>|t|)` < .05,  Term, NA)),
+                       size = 4,
+                       # nudge_y = 0.5,
+                       show.legend = FALSE,
+                       max.overlaps = 20)+
+      geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+
+      geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+
+      theme_bw()+
+      # facet_wrap(~quintile, scales = "fixed")+
+      ggtitle("parafovea_rate ~ SEXF + phenotype_i + (1| patID)")
+
+ggsave(paste0(MT_modeling_path, "parafovea_rate_by_phenos_volcano_MT_filtered_nominalP.png"), parafovea_rate_by_phenos_volcano_MT_filtered_nominalP,  width = h_w[2], height = h_w[1], dpi = 200)
+
+
+# # add results to list
+# parafovea_rate_results_df_filtered <- results_df_MT_filtered
+# poster_results_dfs[["parafovea_rate_results_df_filtered"]] <- parafovea_rate_results_df_filtered
+
+
+
+```
+
+### step wise rate
+#### subset data to scale and model
+* filter out the ones with (rows>0) < 30
+```{r}
+
+var  = "parafovea"
+# subset d with vars of interest 
+model_df <- d %>% 
+  select(month, patID_eye, patID, SEXF, all_of(c(phenotypes, var))) %>% 
+  as.data.frame()
+
+# scale vars of interest, minus var: FA2_rate
+model_df[, phenotypes[phenotypes!=var] ] <- scale(model_df[, phenotypes[phenotypes !=var] ])
+
+
+
+model_df_lag <- mclapply(unique(model_df$patID_eye), function(x) stepwise_rate(x, df = model_df,  var = var, time_var = "month"), mc.cores = detectCores()-1) %>% 
+  do.call(rbind,.)
+
+response = sprintf("%s_rate", var)
+
+
+```
+
+#### model each variable against parafovea rate, correcting for SEXF, and random effect of patient dependence
+> modeling rate by  patient's first phenotype does not have time effect, and therefore no repeated eye measures; but there are still repeated patients because each has two eyes
+
+```{r}
+
+# exclude the response variable, parafovea_rate
+input_phenotypes <- setdiff( names(model_df_lag), c("month","patID_eye", "patID", "SEXF",response, var, "year"))
+  
+# formulas
+form_strs <- paste0(response, " ~ ",input_phenotypes," + SEXF  + (1|patID) + (1|patID_eye)")
+
+# for each variable in input_phenotypes, model FA_mean 
+results_list <- mclapply(form_strs, function(form_str){
+  ## linear model with random effects
+  formula <- as.formula(form_str)
+
+  fit <- try({lmer(formula = formula, data = model_df_lag)})
+  
+  if(inherits(fit, "try-error")){
+    return(NA)
+  }else{
+    return(summary(fit))
+  }
+}, mc.cores = detectCores()-1)
+
+names(results_list) <- str_extract(form_strs, "\\S+\\s*~\\s*\\S+")
+
+names(results_list)[is.na(results_list)]
+# "parafovea_rate ~ first_OTHER_DISEASE" "parafovea_rate ~ first_SMKCIGSDAY" "parafovea_rate ~ first_t2d"
+
+# filter for models that worked
+results_list <- results_list[!is.na(results_list)]
+
+## make results df ####
+results_df <- extract_results(results_list)
+parafovea_stepwise_results_df <- results_df
+
+results_df <- results_df %>% 
+  filter(!grepl("(Intercept)|SEXF|month", Term)) 
+
+# filter for models that don't make sense
+results_df_filtered <- results_df %>% 
+  filter(!Term   %in% grep("avg|MT0|_.*0\\d$|MICRON|FOVTHICK|SEX", results_df$Term, value = TRUE)) # exclude MT vars and zonal vars
+
+
+# volcano plot of vaa~phenotypes result
+parafovea_rate_by_phenos_volcano <-ggplot(results_df, aes(x = Estimate, y = -log10(q_value), color = Term))+
+      geom_point(show.legend = FALSE)+
+      geom_label_repel(aes(label = ifelse( q_value <= .05,  Term, NA)),
+                       size = 4,
+                       nudge_y = 0.5,
+                       show.legend = FALSE,
+                       max.overlaps = 20)+
+      geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+
+      geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+
+      theme_bw()+
+      # facet_wrap(~quintile, scales = "fixed")+
+      ggtitle("stepwise_parafovea_rate ~ SEXF + phenotype_i + (1| patID) + (1|patID_eye)")
+
+ggsave(paste0(MT_modeling_path, "parafovea_stepwise_lag_rate_by_phenos_volcano.png"), parafovea_rate_by_phenos_volcano, width = 20, height = 12, dpi = 200)
+
+# volcano plot of vaa~phenotypes result
+parafovea_rate_by_phenos_volcano_MT_filtered<- ggplot(results_df_filtered, aes(x = Estimate, y = -log10(q_value), color = Term))+
+      geom_point(show.legend = FALSE)+
+      geom_label_repel(aes(label = ifelse( q_value <= .05,  Term, NA)),
+                       size = 4,
+                       nudge_y = 0.5,
+                       show.legend = FALSE,
+                       max.overlaps = 20)+
+      geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+
+      geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+
+      theme_bw()+
+      # facet_wrap(~quintile, scales = "fixed")+
+      ggtitle("stepwise_parafovea_rate ~ SEXF + phenotype_i + (1| patID) + (1|patID_eye)")
+
+ggsave(paste0(MT_modeling_path, "parafovea_stepwise_lag_rate_by_phenos_volcano_MT_filtered.png"), parafovea_rate_by_phenos_volcano_MT_filtered, width = 20, height = 12, dpi = 200)
+
+parafovea_rate_by_phenos_volcano_MT_filtered_nominalP<- ggplot(results_df_filtered, aes(x = Estimate, y = -log10(`Pr(>|t|)`), color = Term))+
+      geom_point(show.legend = FALSE)+
+      geom_label_repel(aes(label = ifelse( `Pr(>|t|)` < .05,  Term, NA)),
+                       size = 4,
+                       # nudge_y = 0.5,
+                       show.legend = FALSE,
+                       max.overlaps = 20)+
+      geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+
+      geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+
+      theme_bw()+
+      # facet_wrap(~quintile, scales = "fixed")+
+      ggtitle("stepwise_parafovea_rate ~ SEXF + phenotype_i + (1| patID) + (1|patID_eye)")
+
+ggsave(paste0(MT_modeling_path, "parafovea_stepwise_lag_rate_by_phenos_volcano_MT_filtered_nominalP.png"), parafovea_rate_by_phenos_volcano_MT_filtered_nominalP,  width = h_w[2], height = h_w[1], dpi = 200)
+
+
+# # add results to list
+# parafovea_rate_results_df_filtered <- results_df_MT_filtered
+# poster_results_dfs[["parafovea_rate_results_df_filtered"]] <- parafovea_rate_results_df_filtered
+
+
+
+```
+
+
+
+### compare global to stepwise
+```{r}
+
+fun <- function(x){
+x %>% 
+  mutate(Term = str_remove_all(Term, "first_")) %>% 
+  select(Term, `Pr(>|t|)`) %>% 
+  mutate(neglogP = -log10(`Pr(>|t|)`)) %>% 
+  select(-`Pr(>|t|)`) %>% 
+  filter(!grepl("Intercept|SEX", Term))
+}
+
+inner_join(fun(parafovea_global_results_df), fun(parafovea_stepwise_results_df <- results_df), by = "Term", suffix = c("_global", "_stepwise")) %>% 
+  column_to_rownames("Term") %>% 
+  mutate_all(~-log10(.)) %>% 
+  plot()
+
+
+abline(a = 0, b = 1)
+
+
+```
+
+#___   ________   _____   ______
+# model slope
+
+<!-- ## *slope  -->
+<!-- ### subset data to scale and model -->
+<!-- * filter out the ones with (rows>0) < 30 -->
+<!-- ```{r} -->
+<!-- #  -->
+<!-- # #  variables (rows of value>0) < 30 where MT_slope_sans3 present -->
+<!-- # m <- d[!is.na(d$MT_slope_sans3),phenotypes] != 0 -->
+<!-- #  -->
+<!-- # vars <- m %>% -->
+<!-- #   colSums(., na.rm = TRUE)  -->
+<!-- #  -->
+<!-- # # variables with > 30 obs of value>0  -->
+<!-- # deviant_vars <- vars[vars > 30] %>% names() -->
+<!-- #  -->
+<!-- # # how many unique months do these have where FA_mean and var available? -->
+<!-- # count_unq_months <-  sapply(deviant_vars, function(x){  -->
+<!-- #                     # how many unique months where both mr and var available? -->
+<!-- #                     return( d $month[!is.na(d$MT_slope_sans3) & !is.na(d[,x])] %>%  -->
+<!-- #                              unique() %>% -->
+<!-- #                              length() -->
+<!-- #                             ) -->
+<!-- #                   }) -->
+<!-- # # vars with greater than one unique month observed  -->
+<!-- # slope_greater_than_one_month <- count_unq_months[count_unq_months>1] %>%  -->
+<!-- #   names() -->
+<!-- #  -->
+<!-- # # setdiff(deviant_vars ,greater_than_one_month  ) # "BLRPATTERN"  "NOABNORMFAF" only have 1 month of observations where >30 records of rows of value > 0 -->
+
+<!-- response = "MT_slope_sans3" -->
+<!-- # subset d with vars of interest  -->
+<!-- model_df <- d %>%  -->
+<!--   select(month, patID_eye, patID, SEXF, all_of(c(phenotypes, response))) -->
+
+<!-- # scale vars of interest, minus response: FA2_rate -->
+<!-- model_df[, phenotypes[phenotypes!=response] ] <- scale(model_df[, phenotypes[phenotypes!=response] ]) -->
+
+
+<!-- ``` -->
+
+<!-- ### model each variable against slope correcting for SEXF, and random effect of patient dependence -->
+
+<!-- ```{r} -->
+
+<!-- # exclude the response variable, mt5 -->
+<!-- input_phenotypes <- names(model_df)[!names(model_df) %in% c("month","patID_eye", "patID", "SEXF", "MT_slope_sans3")] -->
+
+<!-- # formulas -->
+<!-- form_strs <- paste0(response, " ~ ",input_phenotypes," + SEXF  + (1|patID) + (1|patID_eye)") -->
+
+<!-- # for each variable in input_phenotypes, model FA_mean  -->
+<!-- results_list <- mclapply(form_strs, function(form_str){ -->
+
+<!--   ## linear model with random effects -->
+<!--   re_formula <- as.formula(form_str) -->
+
+<!--   fit <- try({lmer(formula = re_formula, data = model_df)}) -->
+
+<!--   return(summary(fit)) -->
+
+<!-- }, mc.cores = detectCores()-1) -->
+
+<!-- names(results_list) <- sub("\\s\\+.*", "", form_strs) -->
+
+<!-- # filter for models that worked -->
+<!-- results_list <- results_list[unlist(lapply(results_list, function(x) !all(class(x) %in% c("summaryDefault", "table"))))] -->
+
+<!-- ## make results df #### -->
+<!-- results_df <- extract_results(results_list) -->
+
+<!-- results_df <- results_df %>%  -->
+<!--   filter(!Term %in% c("(Intercept)", "SEXF", "month")) -->
+
+<!-- # filter for models that don't make sense -->
+<!-- results_df_filtered <- results_df %>%  -->
+<!--   filter(!Term   %in% grep("avg|MT0|_.*0\\d$|MICRON|SEX", results_df$Term, value = TRUE)) # exclude MT vars and zonal vars -->
+
+
+<!-- MT_slope_sans3_by_phenos_volcano_filtered <-ggplot(results_df_filtered, aes(x = Estimate, y = -log10(q_value), color = Term))+ -->
+<!--       geom_point(show.legend = FALSE)+ -->
+<!--       geom_label_repel(aes(label = ifelse( q_value <= .05,  Term, NA)), -->
+<!--                        size = 4, -->
+<!--                        nudge_y = 0.5, -->
+<!--                        show.legend = FALSE, -->
+<!--                        max.overlaps = 20)+ -->
+<!--       geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+ -->
+<!--       geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+ -->
+<!--       theme_bw()+ -->
+<!--       # facet_wrap(~quintile, scales = "fixed")+ -->
+<!--       ggtitle("MT_slope_sans3 (-zone3) ~ SEXF + phenotype_i + (1| patID_eye) + (1|patID)") -->
+
+<!-- ggsave(paste0(MT_modeling_path, "MT_slope_sans3_by_phenos_volcano_filtered.png"), MT_slope_sans3_by_phenos_volcano_filtered, width = 20, height = 12, dpi = 200) -->
+
+
+
+
+
+<!-- ``` -->
+
+
+<!-- ## *slope rate  -->
+<!--  ### subset data to scale and model -->
+<!-- * filter out the ones with (rows>0) < 30 -->
+<!-- ```{r} -->
+
+
+<!-- # #  variables (rows of value!=0) < 30 where MT_slope_sans3_rate present -->
+<!-- # m <- d[!is.na(d$MT_slope_sans3_rate) , phenotypes] != 0 -->
+<!-- # vars <- m %>% -->
+<!-- #   colSums(., na.rm = TRUE) -->
+<!-- #  -->
+<!-- # # variables with > 30 obs of value != 0 -->
+<!-- # deviant_vars <- vars[vars > 30] %>% names() -->
+<!-- #  -->
+<!-- # # how many unique months do these have where FA_mean and var available? -->
+<!-- # count_unq_months <-  sapply(deviant_vars, function(x){ -->
+<!-- #                     # how many unique months where both mr and var available? -->
+<!-- #                     return( d $month[!is.na(d$MT_slope_sans3_rate) & !is.na(d[,x])] %>% -->
+<!-- #                              unique() %>% -->
+<!-- #                              length() -->
+<!-- #                             ) -->
+<!-- #                   }) -->
+<!-- # # vars with greater than one unique month observed -->
+<!-- # slope_rate_greater_than_one_month <- count_unq_months[count_unq_months>1] %>% -->
+<!-- #   names() -->
+
+
+<!-- # # filter out vars that dont change where there is an fameanrate -->
+<!-- # vars_dont_change <- phenotypes[ sapply(d[  !is.na(d$MT_slope_sans3_rate), phenotypes], n_distinct) <= 1] -->
+<!-- #  -->
+<!-- # # how many unique months do these have where MT_slope_sans3_rate and var available?  -->
+<!-- # count_unq_months <- sapply(phenotypes, function(x){ -->
+<!-- #    -->
+<!-- #   num_months <- d$month[!is.na(d$MT_slope_sans3_rate) & !is.na(d[[x]]) ] %>%  -->
+<!-- #       unique() %>%  -->
+<!-- #       length() -->
+<!-- #   return(num_months) -->
+<!-- # }) -->
+<!-- #  -->
+<!-- # vars_few_month <- count_unq_months[count_unq_months<2] %>%  -->
+<!-- #   names() -->
+<!-- #  -->
+<!-- # vars_dont_change_and_few_month <- c(vars_dont_change, vars_few_month) %>% unique() -->
+<!-- #  -->
+<!-- # slope_rate_greater_than_one_month <- c("MT_slope_sans3_rate", phenotypes[!phenotypes %in% vars_dont_change_and_few_month]) -->
+
+<!-- response = "MT_slope_sans3_rate" -->
+<!-- # subset d with vars of interest  -->
+<!-- model_df <- d %>%  -->
+<!--   select(month, patID_eye, patID, SEXF, all_of(c(phenotypes, response))) -->
+
+<!-- # scale vars of interest, minus response: FA2_rate -->
+<!-- model_df[, phenotypes[phenotypes!=response] ] <- scale(model_df[, phenotypes[phenotypes!=response] ]) -->
+
+
+<!-- # make df of first visit phenotype values;  if first visit value @ phenotype is NA, grab first non-na, else, NA; exclude duplicated rows -->
+<!-- first_values_df <- model_df %>%  -->
+<!--   select(-patID, - SEXF,-MT_slope_sans3_rate ) %>%  -->
+<!--   arrange(patID_eye , month) %>%   -->
+<!--   group_by(patID_eye) %>% -->
+<!--   mutate( -->
+<!--     across( -->
+<!--         everything(),  -->
+<!--         ~dplyr::first(.[!is.na(.)]), -->
+<!--         .names = "first_{.col}" -->
+<!--   )) %>% -->
+<!--   ungroup() %>% -->
+<!--   select(-matches("month"), -matches("slope_rate")) %>%  -->
+<!--   select(patID_eye,  starts_with("first_")) %>%  -->
+<!--   unique() %>%  -->
+<!--   arrange(patID_eye) -->
+
+<!-- # join the first df to the model df -->
+<!-- model_df_first <- model_df %>%  -->
+<!--   arrange(patID_eye) %>%  -->
+<!--   select(patID_eye, patID, SEXF, MT_slope_sans3_rate) %>%  -->
+<!--   na.omit() %>% -->
+<!--   unique() %>%   -->
+<!--   left_join(., first_values_df) -->
+
+<!-- # # scale model_df_first -->
+<!-- # model_df_first <- model_df_first %>%  -->
+<!-- #   mutate(across(-c( patID_eye, patID, SEXF) , ~as.vector(scale(.))) )    -->
+
+<!-- # # filter out vars with sd na or 0 -->
+<!-- # sds <- model_df_first %>%  -->
+<!-- #   select(-c(patID_eye, patID, SEXF)) %>%  -->
+<!-- #   sapply(., function(x)sd(x, na.rm = TRUE) %>% round) -->
+<!-- #  -->
+<!-- # # model df of ids and vars with sd not na or 0 -->
+<!-- # model_df_first <- model_df_first %>%  -->
+<!-- #   select(patID_eye, patID, SEXF, MT_slope_sans3_rate, all_of( names(sds[sds !=0 & !is.na(sds)]) )  ) -->
+
+
+<!-- ``` -->
+
+<!-- ### model each variable against slope rate, correcting for SEXF, and random effect of patient dependence -->
+<!-- ```{r} -->
+
+<!-- # exclude the response variable, MT_slope_sans3_rate -->
+<!-- input_phenotypes <- names(model_df_first)[!names(model_df_first) %in% c("month","patID_eye", "patID", "SEXF", "MT_slope_sans3_rate")] -->
+
+<!-- # formulas -->
+<!-- form_strs <- paste0(response, " ~ ",input_phenotypes," + SEXF  + (1|patID)") -->
+
+<!-- # for each variable in input_phenotypes, model FA_mean  -->
+<!-- results_list <- mclapply(form_strs, function(form_str){ -->
+
+<!--   ## linear model with random effects -->
+<!--   re_formula <- as.formula(form_str) -->
+
+<!--   fit <- try({lmer(formula = re_formula, data = model_df_first)}) -->
+
+<!--   return(summary(fit)) -->
+
+<!-- }, mc.cores = detectCores()-1) -->
+
+<!-- names(results_list) <- sub("\\s\\+.*", "", form_strs) -->
+
+<!-- # filter for models that worked -->
+<!-- results_list <- results_list[unlist(lapply(results_list, function(x) !all(class(x) %in% c("summaryDefault", "table"))))] -->
+
+<!-- ## make results df #### -->
+<!-- results_df <- extract_results(results_list) -->
+
+<!-- results_df <- results_df %>%  -->
+<!--   filter(!Term %in% c("(Intercept)", "SEXF", "month")) -->
+
+<!-- # filter for models that don't make sense -->
+<!-- results_df_filtered <- results_df %>%  -->
+<!--   filter(!Term   %in% grep("avg|MT0|_.*0\\d$|MICRON|SEX", results_df$Term, value = TRUE)) # exclude MT vars and zonal vars -->
+
+
+
+
+<!-- # Plotting ------- -->
+
+<!-- # volcano plot of vaa~phenotypes result -->
+<!-- MT_slope_sans3_rate_by_phenos_volcano <-ggplot(results_df, aes(x = Estimate, y = -log10(q_value), color = Model))+ -->
+<!--       geom_point(show.legend = FALSE)+ -->
+<!--       geom_label_repel(aes(label = ifelse( q_value <= .05,  Model, NA)), -->
+<!--                        size = 4, -->
+<!--                        nudge_y = 0.5, -->
+<!--                        show.legend = FALSE, -->
+<!--                        max.overlaps = 20)+ -->
+<!--       geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+ -->
+<!--       geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+ -->
+<!--       theme_bw()+ -->
+<!--       # facet_wrap(~quintile, scales = "fixed")+ -->
+<!--       ggtitle("avg_slope rate(-3) ~ SEXF + phenotype_i + (1| patID)") -->
+
+<!-- # ggsave(paste0(MT_modeling_path, "MT5_slope_rate_by_phenos_volcano.png"), MT5_slope_rate_by_phenos_volcano, width = 20, height = 12, dpi = 200) -->
+<!-- #  -->
+<!-- # # volcano plot of vaa~phenotypes result -->
+<!-- # MT5_slope_rate_by_phenos_volcano_otherZones_filtered<- ggplot(results_df_otherZones_filtered, aes(x = Estimate, y = -log10(q_value), color = Model))+ -->
+<!-- #       geom_point(show.legend = FALSE)+ -->
+<!-- #       geom_label_repel(aes(label = ifelse( q_value <= .05,  Model, NA)), -->
+<!-- #                        size = 4, -->
+<!-- #                        nudge_y = 0.5, -->
+<!-- #                        show.legend = FALSE, -->
+<!-- #                        max.overlaps = 20)+ -->
+<!-- #       geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+ -->
+<!-- #       geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+ -->
+<!-- #       theme_bw()+ -->
+<!-- #       # facet_wrap(~quintile, scales = "fixed")+ -->
+<!-- #       ggtitle("MT5_slope rate ~ SEXF + phenotype_i + (1| patID)") -->
+<!-- #  -->
+<!-- # ggsave(paste0(MT_modeling_path, "MT5_slope_rate_by_phenos_volcano_otherZones_filtered.png"), MT5_slope_rate_by_phenos_volcano_otherZones_filtered, width = 20, height = 12, dpi = 200) -->
+
+<!-- # volcano plot of vaa~phenotypes result -->
+<!-- MT_slope_sans3_rate_by_phenos_volcano_MT_filtered<- ggplot(results_df_filtered, aes(x = Estimate, y = -log10(q_value), color = Term))+ -->
+<!--       geom_point(show.legend = FALSE)+ -->
+<!--       geom_label_repel(aes(label = ifelse( q_value <= .05,  Term, NA)), -->
+<!--                        size = 4, -->
+<!--                        nudge_y = 0.5, -->
+<!--                        show.legend = FALSE, -->
+<!--                        max.overlaps = 20)+ -->
+<!--       geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+ -->
+<!--       geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+ -->
+<!--       theme_bw()+ -->
+<!--       # facet_wrap(~quintile, scales = "fixed")+ -->
+<!--       ggtitle("avg_slope(-3) rate ~ SEXF + phenotype_i + (1| patID)") -->
+
+<!-- ggsave(paste0(MT_modeling_path, "MT_slope_sans3_rate_by_phenos_volcano_MT_filtered.png"), MT_slope_sans3_rate_by_phenos_volcano_MT_filtered, width = 20, height = 12, dpi = 200) -->
+
+<!-- MT_slope_sans3_rate_by_phenos_volcano_MT_filtered_nominalP<- ggplot(results_df_filtered, aes(x = Estimate, y = -log10(`Pr(>|t|)`), color = Term))+ -->
+<!--       geom_point(show.legend = FALSE)+ -->
+<!--       geom_label_repel(aes(label = ifelse( `Pr(>|t|)` < .05,  Term, NA)), -->
+<!--                        size = 4, -->
+<!--                        # nudge_y = 0.5, -->
+<!--                        show.legend = FALSE, -->
+<!--                        max.overlaps = 20)+ -->
+<!--       geom_abline(slope = 0, intercept = -log10(.05), linetype = 2, color = "red")+ -->
+<!--       geom_vline(xintercept = 0, color = "darkgrey", linetype = "dashed")+ -->
+<!--       theme_bw()+ -->
+<!--       # facet_wrap(~quintile, scales = "fixed")+ -->
+<!--       ggtitle("avg_slope rate(-3) ~ SEXF + phenotype_i + (1| patID)") -->
+
+<!-- ggsave(paste0(MT_modeling_path, "MT_slope_sans3_rate_by_phenos_volcano_MT_filtered_nominalP.png"), MT_slope_sans3_rate_by_phenos_volcano_MT_filtered_nominalP,width = h_w[2], height = h_w[1], dpi = 400) -->
+
+<!-- #  -->
+<!-- # # add results to list -->
+<!-- # MT_slope_sans3_rate_results_df_filtered <- results_df_MT_filtered -->
+<!-- # poster_results_dfs[["MT_slope_sans3_rate_results_df_filtered"]] <- MT_slope_sans3_rate_results_df_filtered -->
+
+
+
+<!-- ``` -->
+
+#________________________
+# heatmap of structural  variables
+```{r}
+
+str_vars <- names(d)[sapply(d, function(x) is.numeric(x)|is.factor(x))] %>% 
+  grep("eye|VAAM|month|DIAG|GRADER|msng|quint|pat|vis|SITE|SMK", .,value = TRUE, invert = TRUE)
+  
+setdiff(names(d), str_vars)
+
+m <- d %>% 
+  ungroup() %>% 
+  select(all_of(str_vars)) %>%
+  select(where(~ mean(is.na(.)) < 1)) %>% 
+  # select(all_of(sub_str_vars)) %>% 
+  mutate_all(~as.numeric(as.character(.))) %>% 
+  as.matrix() %>% 
+  scale()
+
+cor_m <- cor(m, use = "pairwise.complete.obs")
+
+col_dend <- as.dendrogram(hclust(dist(cor_m), 
+                                 method = "ward.D2"
+                                 # method = "complete"
+                                 ))
+row_dend <- as.dendrogram(hclust(dist(cor_m^2),
+                                 method = "ward.D2"
+                                 # method = "complete"
+                                 ))
+
+hm <- Heatmap(cor_m, 
+              column_title = "Feature correlations",
+              na_col = "grey", 
+              cluster_rows = TRUE,
+              cluster_columns = TRUE,
+              # cluster_rows = row_dend, 
+              # cluster_columns = col_dend,
+              # cluster_columns = row_dend,
+              clustering_method_columns = "ward.D2",
+              clustering_method_rows = "ward.D2",
+              row_names_gp = gpar(fontsize = 7),
+              column_names_gp = gpar(fontsize = 7), 
+              row_dend_width = unit(5, "cm"),
+              column_dend_height = unit(5, "cm")
+              )
+
+png(paste0(wd_path, "results/modeling/str_vars_clustered_hm.png"), height = 2000, width = 2000)
+draw(hm)
+dev.off()
+
+```
+
+#____________________________
+#|||||||||||||||||||||
+
+# Save data
+```{r}
+
+
+saveHDF5SummarizedExperiment(sce, paste0(wd_path, "processed_data/sce003.h5"), replace = T)
+
+notify.me("10_functionAndStructureModeling.Rmd Completed")
+# D
+# new_data_name <- data_name %>% 
+#   gsub("6", "7", .)
+# saveRDS(d, paste0(wd_path, "processed_data/", new_data_name))
+# # info
+# write.xlsx(info, paste0(wd_path, "processed_data/database_grading_key_05.xlsx"))
+# # raw
+# saveRDS(raw, paste0(wd_path , "processed_data/dfs_list_03.rds"))
+```
+
+```{r}
+check_dims()
+# dims : 12525 143
+#                      [,1]
+# n_patIDs             3675
+# n_patID_eyes         7328
+# n_observations      12525
+# n_patIDs_w_gr_1_vis   516
+# ^ no change
+
+### APRIL 2 2025 ###
+# dims : 12276 180
+# n_patIDs             3971
+# n_patID_eyes         7888
+# n_observations      12275
+# n_patIDs_w_gr_1_vis   492
+
+
+```
+

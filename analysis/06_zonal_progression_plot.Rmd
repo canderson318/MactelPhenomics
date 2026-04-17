@@ -1,0 +1,236 @@
+---
+title: "07_zonalProgressionAnalysis"
+author: "Christian Anderson"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# options
+```{r}
+# dev.off()  # Turn off the current graphics device
+# options(device = "RStudioGD")
+```
+
+
+# Packages
+```{r, message=FALSE, warning=FALSE, results='hide', echo = TRUE}
+library(tidyr)
+library(dplyr)
+library(reshape2)
+library(purrr)
+library(GGally)
+library(tidyverse)
+library(ggpubr)
+library(vcd)
+library(UpSetR)
+library(ggplot2)
+library(gridExtra)
+library(BiocSingular)
+library(ComplexHeatmap)
+library(viridis)
+library(knitr)
+library(htmlwidgets)
+library(zoo)
+library(corrplot)
+library(RColorBrewer)
+library(openxlsx)
+library(plotly)
+# library(scater)
+library(RColorBrewer)
+library(mgcv)
+library(zoo)
+library(tools)
+library(mice)
+library(grDevices)
+# library(limma)
+library(ggrepel)
+library(networkD3)
+library(htmltools)
+
+
+
+rm(list = ls())
+gc()
+```
+
+Task: measure zone progression for each phenotype
+
+# Load Data
+
+```{r, message=FALSE, warning=FALSE, results='hide', echo = TRUE}
+wd_path = "~/Documents/LMRI/PRJ2024001/version015/"
+
+# raw list of dfs
+raw <- readRDS(paste0(wd_path, "processed_data/dfs_list_01.rds"))
+
+# joined cleaned joined data
+data_name <- "CF_FFA_DEM_DIAGNOSIS_ENRNHOR_ENRNHOS_FAFGRADE_FAMSTATUS_MH_OCTMAIN_OCTMTCIRRUS_OCTMTSPECTRALIS_OCTMTSTRATUS_VAA_lea_05.rds"
+data <- readRDS(paste0(wd_path, "processed_data/", data_name))# clean data with everything 
+d <- data
+
+# grading nomenclature and information
+path <- paste0(wd_path, "processed_data/database_grading_key_04.xlsx")
+info <- read.xlsx(path)
+
+```
+
+# make new directories
+```{r}
+path <- paste0(wd_path, "results/longitudinal_analysis/")
+if(!dir.exists(path)) dir.create(path, recursive = TRUE)
+
+```
+
+#________________________
+
+
+# plot counts of zones at each time point for each patient
+```{r}
+
+# phenotypes that have zones
+zonal_cols <- grep("0\\d", names(d), value = TRUE) %>% 
+  grep("cirrus|spectralis|stratus|RW|MT", ., value = TRUE, invert = TRUE)
+
+# pattern of phenotype
+phenotype_patterns <- sapply(zonal_cols, function(x){substr(x,1, 3 )}) %>% 
+  unique()
+
+###
+# # pattern to look at
+phenotype_pattern <- "LRT"#phenotype_patterns[7]
+###
+
+# loop    
+plots <- list(); for (phenotype_pattern in phenotype_patterns){
+    
+    # select cols for phenotype
+    a <-d %>% 
+      select( month, patID_eye, eye_num, all_of(starts_with(phenotype_pattern)))
+    
+    # make cols binary, 1 if >0
+    b <- a %>% 
+     mutate(across(starts_with(phenotype_pattern),  
+             ~ ifelse(.>0, 1, 0))
+      ) %>% 
+      arrange(month)
+    
+    # sum across columns 
+    c <-b %>% 
+      mutate(pheno_count = rowSums(across(starts_with(phenotype_pattern)), na.rm = TRUE)) %>% 
+      group_by(patID_eye) %>% 
+      mutate(pheno_count_delta0 = pheno_count - dplyr::first(pheno_count)) %>% 
+      ungroup()
+          
+    # eyes that have more than one visit and eye not na
+    return_eyes <- c %>% 
+      # filter(!is.na(eye_num)) %>% 
+      group_by(patID_eye) %>% 
+      arrange(month) %>% 
+      summarize(count_visit = n_distinct(month)) %>% 
+      ungroup() %>% 
+      filter(count_visit > 1) %>% 
+      pull(patID_eye) %>% 
+      unique()
+    
+    
+    
+    changing_eyes <- c %>% 
+      group_by(patID_eye) %>% 
+      summarize(num_diff_counts = n_distinct(pheno_count)) %>% 
+      ungroup() %>% 
+      filter(num_diff_counts > 1) %>% 
+      pull(patID_eye)
+    
+    # eyes_of_interest <- c %>% 
+    #   group_by(patID_eye) %>% 
+    #   summarize(unique_pheno_count = length(unique(pheno_count))) %>% 
+    #   filter(unique_pheno_count>1) %>% 
+    #   pull(patID_eye) %>% unique()
+    
+    
+    # filter c
+    e <- c %>%
+      # filter(
+      #   patID_eye%in%
+      #   unique(c %>% filter(month == 0) %>% filter(pheno_count==0) %>% pull(patID_eye)) # filter for patients who have count of zero at visit 0
+      # ) %>% 
+      filter(patID_eye%in%return_eyes) %>%  # filter for patients who have more than one visit
+      filter(patID_eye%in%changing_eyes) # filter for patients whose count changes
+    
+    # how many patients fit these rules
+    N <- unique(e$patID_eye) %>% length()
+    
+    plot <- ggplot(e, aes(x = month, y = pheno_count_delta0, color = patID_eye))+
+      geom_smooth(method = "lm", alpha = .01, show.legend = FALSE, se = FALSE)+
+      # geom_point(show.legend = FALSE, size = 1,  aes(color = patID_eye), alpha = .3)+
+      scale_y_continuous(limits = c(0, 9))+
+      geom_smooth(aes(group = 1), se = FALSE, color = "black", linetype = "dashed") +
+      theme_bw()+
+      ggtitle(paste0("Change from baseline in count of zones with ", phenotype_pattern, " over time\nshown are patients who have more than one visit \nand develop at some point\nN = ", N))+
+      ylab("Count of zones with phenotype (spread)")
+
+    plots[[phenotype_pattern]] <- plot
+ }
+    
+    
+grobs <- lapply(plots, ggplotGrob)    
+p <- gridExtra::marrangeGrob(grobs = grobs, nrow = 2, ncol = 4)
+
+ggsave(paste0(wd_path, "results/longitudinal_analysis/zonal_phenos_counts_stairstep.png"), p, height = 15, width = 25, dpi = 150)
+```
+
+```{r}
+print("... 06 complete ...")
+```
+
+
+```{r, look at dims}
+check_dims <- function(D = d){
+  
+  cat(paste0("\ndims : ", paste(dim(D), collapse = " "),"\n"))
+  
+  n_patIDs <- D %>% 
+    select(patID, visitID, eye_num) %>% 
+    drop_na() %>% 
+    pull(patID ) %>% 
+    n_distinct(na.rm = TRUE)
+  
+  n_patID_eyes <- D %>% 
+    select(patID, visitID, eye_num) %>% 
+    drop_na() %>% 
+    select(patID, eye_num) %>% 
+    n_distinct(na.rm = TRUE)
+  
+  n_observations <- D %>% 
+    select(patID, visitID, eye_num) %>% 
+    drop_na() %>% 
+    n_distinct(na.rm = TRUE)
+  
+  n_patIDs_w_gr_1_vis <- D %>% 
+    select(patID, visitID, eye_num) %>% 
+    drop_na() %>% 
+    filter(n()>1, .by = c(patID, eye_num)) %>% 
+    pull(patID) %>% 
+    n_distinct(na.rm = TRUE)
+  
+  print(rbind(n_patIDs,n_patID_eyes,n_observations,n_patIDs_w_gr_1_vis))
+  
+}
+
+check_dims()
+# dims : 12600 319
+#                      [,1]
+# n_patIDs             3693
+# n_patID_eyes         7386
+# n_observations      12600
+# n_patIDs_w_gr_1_vis   516
+# ^ no changes
+
+### MARCH 14 2025 ###
+# dims : 12619 306
+# n_patIDs             4034
+# n_patID_eyes         8063
+# n_observations      12617
+# n_patIDs_w_gr_1_vis   500
+
+```

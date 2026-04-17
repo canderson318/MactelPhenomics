@@ -1,0 +1,323 @@
+---
+title: "13.3_BMI_Contrasts"
+author: "Christian Anderson"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+
+
+# Packages
+```{r}
+
+library(tidyr)
+library(reshape2)
+library(purrr)
+library(GGally)
+library(tidyverse)
+library(ggplot2)
+library(ggrepel)
+library(gridExtra)
+library(ComplexHeatmap)
+library(viridis)
+library(zoo)
+library(plotly)
+library(mgcv)
+library(tools)
+library(mice)
+library(ggrepel)
+library(htmltools)
+library(Metrics)
+library(psych)
+library(car)
+library(stats)
+library(lme4)
+library(lmerTest)
+library(ape)
+library(SingleCellExperiment)
+library(scater)
+library(dplyr)
+library(HDF5Array)
+library(parallel)
+library(emmeans)
+library(gplots)
+library(limma)
+library(optimx)
+
+rm(list = ls())
+gc()
+
+options(max.print = 100)
+
+```
+
+### functions
+```{r}
+
+source("/Users/canderson/Documents/LMRI/PRJ2024001/version015/analysis/00_MyFunctions.R")
+
+```
+
+# Load Data
+```{r}
+
+wd_path = "~/Documents/LMRI/PRJ2024001/version015/"
+
+a_path <- paste0(wd_path, "results/clustering/13_clustering/BMI_Contrasts/")
+if(!dir.exists(a_path)) {
+  dir.create(a_path, recursive = TRUE)
+  
+}
+# load experiment
+sce <- HDF5Array::loadHDF5SummarizedExperiment(paste0(wd_path, "processed_data/sce006.h5"))
+
+
+```
+
+#  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
+# cluster ~ BMI
+is mean BMI of left route significantly different from mean of right route?
+```{r, data to use}
+
+# cluster t2d bmi data
+clusters <- 
+  as.data.frame(colData(sce)) %>% 
+  select(patID, patID_eye, month, clust = km_nn_cluster, t2d, BMI)
+
+```
+
+## LM contrasts
+### LM on all eyes
+```{r}
+
+# treatment contrasts; where each estimate is difference in mean from reference (cluster 1)
+form_char <- "BMI~clust"
+form <- as.formula(form_char)
+avgs_lm <- lm(form, data = clusters)
+summary(avgs_lm)
+
+design <- model.matrix(~0+clust, data = clusters)
+
+contrast.matrix <- makeContrasts(L.v.R=((clust3+clust7+clust9+clust11)/4)-((clust4+clust6+clust8+clust10)/4),
+                                 endL.v.endR = ((clust9+clust7+clust11)/3) - ((clust6+clust8+clust10)/3),
+                                 three.v.endL = clust3 - ((clust6+clust8+clust10)/3),
+                                 four.v.endR = clust4 - ((clust9+clust7+clust11)/3),
+                                 five.v.else = clust5 - ((clust1+clust2+clust3+clust4+clust6+clust7+clust8+clust9+clust10+clust11)/10),
+                                 levels=design)
+contrasts.list = apply(contrast.matrix,2, `[`, simplify = FALSE)
+
+# estimated marginal means (estimated response means for each group in given model)
+marginal = emmeans(avgs_lm, ~ clust, data = clusters)
+
+# contrasts model
+(Test <- contrast(marginal, contrasts.list))
+# contrast     estimate    SE    df t.ratio p.value
+#  L.v.R           0.448 0.365 10656   1.228  0.2193
+#  endL.v.endR     0.728 0.483 10656   1.508  0.1317
+#  three.v.endL    0.443 0.391 10656   1.133  0.2571
+#  four.v.endR     0.106 0.336 10656   0.315  0.7527
+#  five.v.else     0.986 0.594 10656   1.661  0.0968
+
+results <- 
+  as.data.frame(Test) %>% 
+  mutate(q_value = p.adjust(p.value, method = "BH")) %>% 
+  mutate(contrast = gsub("\\.v\\.", " - ", contrast))
+
+
+ggplot(results, aes(estimate, -log10(p.value)))+
+  geom_vline(xintercept = 0, linetype = 2)+
+  geom_hline(yintercept = -log10(.05), linetype = 2)+
+  geom_point(aes(color = contrast), show.legend = FALSE)+
+  geom_label_repel(aes(label = contrast,color = contrast), show.legend = FALSE)+
+  ggtitle("LM Cluster BMI contrasts",form_char)+
+  theme_bw()
+ggsave(paste0(wd_path, "results/clustering/13_clustering/BMI_Contrasts/cluster_BMI_contrasts.png"), height = 10, width = 12)
+
+```
+
+### LMER on all eyes
+```{r}
+
+# treatment contrasts; where each estimate is difference in mean from reference (cluster 1)
+avgs_lmer <- lmer("BMI~clust + (1|patID)", data = clusters, 
+                  # control = lmerControl(optimizer ="Nelder_Mead")
+                  # control = lmerControl(optimizer ='optimx', optCtrl=list(method='nlminb'))
+                  control = lmerControl(optimizer ='optimx', optCtrl=list(method='L-BFGS-B')) # smalleds re sd residual; THIS ONE WORKS!
+                  )
+summary(avgs_lmer)
+
+# estimated marginal means (estimated response means for each group in given model)
+marginal = emmeans(avgs_lmer, ~ clust, data = clusters)
+
+# contrasts model
+(Test <- contrast(marginal, contrasts.list))
+# contrast     estimate    SE    df t.ratio p.value
+#  L.v.R           0.448 0.365 10656   1.228  0.2193
+#  endL.v.endR     0.728 0.483 10656   1.508  0.1317
+#  three.v.endL    0.443 0.391 10656   1.133  0.2571
+#  four.v.endR     0.106 0.336 10656   0.315  0.7527
+#  five.v.else     0.986 0.594 10656   1.661  0.0968
+
+results <- 
+  as.data.frame(Test) %>% 
+  mutate(q_value = p.adjust(p.value, method = "BH")) %>% 
+  mutate(contrast = gsub("\\.v\\.", " - ", contrast))
+
+
+ggplot(results, aes(estimate, -log10(p.value)))+
+  geom_vline(xintercept = 0, linetype = 2)+
+  geom_hline(yintercept = -log10(.05), linetype = 2)+
+  geom_point(aes(color = contrast), show.legend = FALSE)+
+  geom_label_repel(aes(label = contrast,color = contrast), show.legend = FALSE)+
+  ggtitle("LM Cluster BMI contrasts",form_char)+
+  theme_bw()
+ggsave(paste0(wd_path, "results/clustering/13_clustering/BMI_Contrasts/cluster_BMI_contrasts_lmer.png"), height = 10, width = 12)
+
+```
+
+### stratify model by eye
+```{r}
+
+# make eye and patient fields
+clusters <- clusters %>%
+  mutate(pat_eye= patID_eye) %>% 
+  separate(pat_eye, c("patID", "eye"), "_")
+  
+# select left/right eyes and filter for last observation for each eye
+last_obs_eyes <- lapply(c(right_eyes = 1,left_eyes = 2), function(eye_num){
+  clusters %>% 
+    arrange(patID_eye, month) %>% 
+    filter(eye == eye_num) %>% 
+    filter(row_number() == n(), .by  = patID_eye)
+})
+
+# ****** FUNCTION: model function lm on dataframe ******
+model_eye_side <- function(model_dataframe, formula = character()){
+  
+  # treatment contrasts; where each estimate is difference in mean from reference (cluster 1)
+  form <- as.formula(formula)
+  fit <- lm(form, data = model_dataframe)
+  
+  # design matrix
+  design <- model.matrix(~0+clust, data = model_dataframe)
+  
+  # estimated marginal means  
+  marginal = emmeans(fit, ~ clust, data = clusters)
+
+  # contrasts model
+  (Test <- contrast(marginal, contrasts.list))
+    
+  Test <- as.data.frame(Test)
+  
+  return(list(Contrasts = Test, Summary = summary(fit)))
+}  
+
+# model on each df
+last_obs_eyes_contrasts <- lapply(last_obs_eyes, function(dat){
+  model_eye_side(dat,  formula = "BMI ~ clust")$Contrasts
+})
+# lapply(last_obs_eyes, function(dat)model_eye_side(dat,  formula = "factor(t2d) ~ clust")$Summary)
+
+# make one df
+last_obs_results <- lapply(names(last_obs_eyes_contrasts), function(name){
+  dat = last_obs_eyes_contrasts[[name]]
+  
+  dat$eye <- sub("_.*", "" ,name)
+  return(dat)
+}) %>% 
+  do.call(rbind, .)
+
+# plot
+ggplot(last_obs_results, aes(estimate, -log10(p.value), color = contrast, label = paste(eye,contrast, sep = "::")))+
+  geom_vline(xintercept = 0, linetype = 2)+
+  geom_hline(yintercept = -log10(.05), linetype = 2)+
+  geom_line(alpha = .5, show.legend = FALSE)+
+  geom_point(show.legend = FALSE)+
+  geom_label_repel(show.legend = FALSE)+
+  theme_bw()+
+  ggtitle("LM of left last visits and right last visits separately", "BMI~clust")
+ggsave(paste0(wd_path, "results/clustering/13_clustering/BMI_Contrasts/eye_stratified_last_visit_cluster_BMI_contrasts_lm.png"), height = 10, width = 12)
+
+
+```
+
+
+## Limma contrasts
+```{r}
+
+# all patIDs
+pats <- clusters %>%
+  filter(n()>1, .by = patID_eye) %>%
+  pull(patID)
+
+# response x predictor matrix
+block_clusters <- clusters %>% 
+  arrange(patID_eye) %>% 
+  # filter(patID_eye %in% select_eyes) %>% 
+  filter(patID %in% pats) %>% 
+  select( patID, patID_eye, BMI, clust) %>% 
+  drop_na() 
+
+# design on sub clusters ~ cluster without intercept
+block_design <- model.matrix(~0+clust, data = block_clusters)
+
+
+# make counts matrix p X n
+block_clusters_m <- t(select(block_clusters, BMI))
+
+# check
+qr(block_design)$rank
+dim(block_design)
+dim(block_clusters_m)
+
+# make duplicate correlations object ( Breaks when using singlton patients in blocks!!)
+how.long(T)
+corfit <- duplicateCorrelation(block_clusters_m,
+                             design =  block_design,
+                             block = block_clusters$patID_eye
+                             )
+how.long() # ~ 20min for all; 1m for longitudinal
+
+# Fit the linear model with the correlation structure from duplicateCorrelation
+how.long(T)
+limma_fit <- limma::lmFit(object = block_clusters_m,
+                          design = block_design,
+                          correlation = corfit$consensus.correlation,
+                          block = block_clusters$patID_eye
+                          )
+how.long() # ~ 1min
+# # ^ coefficients match marginal means
+
+
+# Apply eBayes for statistical testing
+
+cfit <- contrasts.fit(limma_fit, contrast.matrix)
+
+limma_e_fit <- eBayes(limma_fit)
+c_efit <- eBayes(cfit)
+
+topTable(c_efit,1)
+limma_c_results <- sapply(1:ncol(contrast.matrix), function(i) topTable(c_efit,i)) %>% t()
+rownames(limma_c_results) <- colnames(contrast.matrix)
+limma_c_results <-cbind(limma_c_results, Estimate = 2^as.numeric(limma_c_results[, "logFC"]) )
+# B is log  odds >> c_efit$lods
+
+# unnest each element
+limma_c_results <- apply(limma_c_results, c(1, 2), function(x) x[[1]])
+
+limma_c_results %>% 
+  as.data.frame( ) %>% 
+  rownames_to_column("Contrast") %>% 
+  ggplot(aes(logFC, -log10(P.Value)))+
+      geom_point(aes(color = Contrast), show.legend = FALSE)+
+      geom_label_repel(aes(label = Contrast, color = Contrast),show.legend =FALSE)+
+      geom_vline(xintercept = 0, linetype = 2)+
+      geom_hline(yintercept = -log10(.05), linetype = 2)+
+      ggtitle("Limma with mixed effects patID_eye block", "BMI~clust")+
+      theme_bw()
+
+
+```
+

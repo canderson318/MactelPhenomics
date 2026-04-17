@@ -1,0 +1,102 @@
+Reviewer Response Table
+
+Reviewer Comment (verbatim)
+Robbie's Comment
+Christian's Comment
+Assigned
+Reviewer 1 — Major Comments
+The statistical models only adjusted for basic confounders such as sex and age. However, as a genetically complex disease, MacTel may be influenced by multiple factors including smoking, alcohol consumption, concomitant medications, and history of other ocular diseases. Furthermore, although diabetes is mentioned as a known comorbidity associated with disease trajectory, the analysis only notes a simple association without in-depth examination of subgroup differences such as diabetes duration or glycemic control levels, potentially missing important confounding effects.
+Easy, as we don’t have this data available to us we simply can’t perform these analysis. We can however discuss how this would have been a good idea and future work should try to capture such differences if they exhist
+
+Robbie
+Could the authors provide code or pseudocode to enhance reproducibility? Additionally, it is recommended to supplement methodological details to increase transparency.
+Christian, create speudo-code of only important cool analyses like the pseudo-progression, network analysis, sigmoid method for estimating time etc..
+Script 1: Imputation
+Script 2: PCA, Clustering, TSNE/UMAP, Trajectory, PSuedotime
+Script 3: XGboost
+Script 4 G-test
+Script 5: Linear modelling
+Script 6: Bayesian time
+Christian
+While applying scRNA-seq methods to clinical phenotypic data is innovative, similar 'pseudotime/trajectory analysis' approaches have precedent in clinical data applications. The authors cite these studies in the introduction but do not fully articulate the essential differences between their framework and existing work. It is suggested that the authors more clearly highlight their innovative positioning in either the introduction or discussion.
+Robbie to think about that. Include more in introduction maybe?
+
+Robbie
+Are the longitudinal data comparable to the overall dataset in terms of clinical characteristics? Could the authors provide a comparison of baseline characteristics between the longitudinal and cross-sectional data?
+Christian could perform an analysis comparing average of phenotypes at baseline compared to phenotypes at follow up. 
+Is this asking whether features are distributed differently between cross-sec. vs. longitudinal? Or what features are observed in one/other.
+Christian
+The supplementary materials indicate that Cluster 7 consists almost entirely of observations from a single clinical center and is considered an artifact excluded from subsequent analyses. This approach is reasonable, but it is recommended that the authors more explicitly discuss the impact of excluding Cluster 7 on trajectory analysis in the main text and present results comparing analyses with and without Cluster 7 in the robustness tests.
+Christian to check at what point the cluster 7 data was removed. 
+If you remove cluster 7 from the linear association modelling: Perform the TESTING again now including all patients in clutser 7 and see how the SNPs to route and SNPs to pheno assoication changes . Testing where not involving route.p-val with/without cluster 7 and beta plot to show model with/without cluster 7 obs results. For results (supp table 8,9,10,11)
+Robbie/Christian
+The study identifies two progression trajectories and reveals their genetic basis. It is recommended that the discussion include a section on how these findings might inform clinical management or prognostic assessment.
+Robbie to include something about this in discussion.
+
+Robbie
+Reviewer 1 — Minor Comments
+Some sentences are excessively long and could benefit from splitting for improved readability.
+Robbie to check
+
+Robbie
+The terms 'pseudoprogression' and 'pseudo-progression' are used interchangeably throughout the manuscript, as are 'vascular alterations' and 'vascular retinal changes.' Consistent terminology throughout the manuscript is recommended.
+Robbie to check
+Make common pseudoprog term and check other phrasing
+Christian
+The abbreviation 'PP' is introduced upon first mention of 'pseudoprogression,' but later paragraphs sometimes use the full term without the abbreviation. Please standardize the usage.
+Robbie to check
+
+Christian
+The aesthetic quality of the figures in the main text could be improved.
+We can have a look at them and see what to improve?? Maybe bring lea in the mix for this.
+1 heatmap
+2 graphical abstract
+3 figure 1
+?
+In the Methods section, the description of 'Foveal Slope' calculation states 'disc diameter (500nm).' Is the unit (nm) reasonable?
+Christian to check
+Find out exactly what you did
+Tell simone what you did
+Tell simone how we wrote it
+Ask her to re-qrite it properly so that we dont create confusion
+Replace it in the manuscript
+Robbie
+The main text frequently references 'Supplementary Materials' without specifying figure or table numbers. Please ensure that corresponding results descriptions are properly annotated with specific supplementary material identifiers to maintain clear linkage between the main text and supplementary materials.
+Robbie to check
+Add specific ids to supp. References in manuscript
+Christian
+Reviewer 2 — Major Comments
+The methodology of repurposing scRNA-seq techniques for clinical phenotypic data lacks sufficient detail. The authors mention clustering, pseudo-time, and trajectory analysis but fail to specify the exact algorithms used (e.g., Monocle, Seurat, or elastic principal graphs) and their parameter settings. 
+Christian to check algorithms used and include them in the supplementary methods (or methods if only present there)
+Add clust/traj/dimred methods to supp. 
+Christian
+Given that scRNA-seq and clinical phenotypic data differ substantially in data structure and dimensionality, the rationale for selecting specific scRNA-seq-derived methods over traditional clinical trajectory analysis tools (e.g., Clintrajan) needs to be elaborated. 
+Robbie to discuss this in the methods.
+
+Robbie
+Additionally, the process of integrating 87 phenotypic variables and handling potential multicollinearity or missing data should be clearly described, as these factors can significantly impact trajectory identification.
+Robbie to rebut that we did include all this information already. Mention there was no case of multi-collinearrity. 
+
+Robbie
+The interpretation of the two identified trajectories requires further validation and contextualization. The manuscript states one trajectory is characterized by vascular alterations and the other by neurodegeneration, but recent studies suggest vascular changes may emerge later in MacTel progression rather than being a distinct early trajectory. The authors should compare their findings with existing MacTel classification systems (e.g., Chew et al.'s severity scale) and imaging-based progression patterns (e.g., ellipsoid zone loss trajectories) to clarify inconsistencies and confirm the novelty of their trajectories. Moreover, the link between trajectory assignment and clinical outcomes (e.g., macular neovascularization, vision loss progression) should be strengthened, as this would enhance the clinical relevance of the findings.
+Robbie to rebut that we indeed compare to the chew grading. Specify that no imaging progression score data was available for these samples. Check if yue’s paper is available online and cite this.
+Robbie to include this in the discussions.
+
+Robbie
+The integration of genetic data is underdeveloped. The authors report that genetic background affects trajectory selection but not progression rate, yet they provide no details on the genetic variants analyzed, their known associations with MacTel, or the statistical methods used to assess genotype-phenotype correlations. Given the growing role of genetics in MacTel research, supplementing this section with key genetic findings (e.g., variants linked to vascular or neurodegenerative pathways) would strengthen the manuscript's precision medicine focus.
+Robbie to address this
+
+Robbie
+The discussion section should better address limitations, such as the cross-sectional nature of the data (even with pseudo-time analysis) and potential selection bias in the patient cohort. 
+Robbie to address this
+
+Robbie
+The generalizability of the framework to other retinal diseases or clinical datasets should also be discussed, along with future directions for validating the trajectory-based approach in longitudinal studies or clinical trials (e.g., in conjunction with neuroprotective therapies like Encelto).
+Robbie to discuss this
+
+Robbie
+I recommend you add cite references as follows: (1) Liu, S., et al. (2025). Comprehensive characterization of T cell subtypes in lung adenocarcinoma. Translational Oncology, 55, 102332. (2) Peng, Z., et al. (2025). 3D tumor cultures for drug resistance and screening development in clinical applications. Molecular Cancer, 24, 93.
+Robbie to check these papers and cite them where appropriate
+These have nothing to do with our paper. Both have Hao Sun, probably the reviewer?
+Robbie
+

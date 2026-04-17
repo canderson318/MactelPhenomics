@@ -1,0 +1,1340 @@
+---
+title: "09.3_ClusteringRobustnessCheck"
+author: "Christian Anderson"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+
+# Packages
+```{r, message=FALSE, warning=FALSE, results='hide', echo = TRUE}
+
+pacman::p_load(tidyr, dplyr, reshape2, purrr, GGally, tidyverse, ggpubr, vcd, ggplot2, gridExtra, ComplexHeatmap, viridis, mgcv, car, zoo, tools, mice, grDevices, ggrepel, grid, Metrics, stats, lme4, lmerTest, dendextend, umap, scater, SingleCellExperiment, scran, bluster, slingshot, ggfortify, pheatmap, TSCAN, igraph, knitr, qs, abind, HDF5Array, igraph, RColorBrewer, mclust, dbscan, parallel, future, magrittr, patchwork)
+
+rm(list = ls())
+gc()
+
+
+```
+
+# functions
+```{r}
+
+source("/Users/canderson/Documents/LMRI/PRJ2024001/version015/analysis/00_MyFunctions.R")
+
+```
+
+
+# Load Data
+
+```{r, message=FALSE, warning=FALSE, results='hide', echo = TRUE}
+
+wd_path = "~/Documents/LMRI/PRJ2024001/version015/"
+
+sce <- HDF5Array::loadHDF5SummarizedExperiment(sprintf("%sprocessed_data/sce002.2.h5", wd_path))
+
+```
+
+# REDO CLUSTER ORDERING AND PC1 
+```{r, eval = TRUE}
+# invert PC1
+## rdims
+pcs <- reducedDim(sce, "PCA")
+pcs[,"PC1"] <- pcs[,"PC1"] * -1
+reducedDim(sce, "PCA") <- pcs
+## tree
+pc_tree <- metadata(sce)$trajectory_data$pca_line_data
+pc_tree$PC1 <- pc_tree$PC1 * -1
+metadata(sce)$trajectory_data$pca_line_data <- pc_tree
+
+# rename clusters
+## order of clusteres along pseudoprog
+new_cluster_names <-  data.frame(colData(sce))%>% 
+  select(my_cluster, pseudoprog) %>% 
+  summarize(mean_pp = mean(pseudoprog),median_pp = median(pseudoprog), .by = my_cluster) 
+
+with(new_cluster_names,{
+     plot(mean_pp,median_pp, type = "n")
+     text(mean_pp,median_pp, labels = my_cluster)
+     add_lines()
+  })
+
+new_cluster_names <- new_cluster_names[order(new_cluster_names$mean_pp),]
+new_cluster_names$new_cluster <- seq(nrow(new_cluster_names))
+
+## assign new cluster based on ppmean
+sce$old_my_cluster <- sce$my_cluster
+sce$my_cluster <- factor(new_cluster_names$new_cluster[match(as.character(sce$my_cluster), as.character(new_cluster_names$my_cluster))])
+
+# ****** Function to replace each part of the edge ******
+replace_edge_clusters <- function(edge_strs) {
+  sapply(edge_strs, function(edge_str){
+    parts <- strsplit(edge_str, "--")[[1]]
+    new_parts <- sapply(parts, function(x) {
+      new_val <- new_cluster_names$new_cluster[match(as.integer(x), new_cluster_names$my_cluster)]
+      as.character(new_val)
+    })
+    paste(new_parts, collapse = "--")
+  })
+}
+
+## replace in trees
+metadata(sce)$trajectory_data$pca_line_data$old_edge<- metadata(sce)$trajectory_data$pca_line_data$edge
+metadata(sce)$trajectory_data$pca_line_data$edge <- replace_edge_clusters(metadata(sce)$trajectory_data$pca_line_data$old_edge)
+
+metadata(sce)$trajectory_data$tsne_line_data$old_edge<- metadata(sce)$trajectory_data$tsne_line_data$edge
+metadata(sce)$trajectory_data$tsne_line_data$edge <- replace_edge_clusters(metadata(sce)$trajectory_data$tsne_line_data$old_edge)
+
+```
+
+# ____________________   ____________________   ____________________   ____________________   ____________________
+
+# EXPERIMENTAL trajectory analysis
+## See how different clustering affects trajectories
+cluster and calculate trajectories on different parameters
+     
+     using > or < 11 clusters changes trajectory?
+     
+```{r}
+# ITERATE THROUGH DIFFERENT PARAMETERS{SEED,CENTERS,K}; SAVE CLUSTERS TO DF ----
+iterate_through_params <- FALSE
+
+## parameters to try; first row is original; make first row original params
+params <- expand.grid(seed = c(1010,43933,29030), 
+                     centers = c(1440, 500,1e3, 1.5e3 ), 
+                     k = c(12,8,10, 1416), 
+                     n_clusters = c(NA), 
+                     clusters= c(NA)
+)
+
+# add iteration number
+params$ith <-  1:nrow(params)
+
+how.long(T);if(iterate_through_params){
+  # for each set of parameters, recluster and save clustering
+  param_results <-  mclapply(1:nrow(params), function(i){
+    set.seed(params$seed[i])
+    km_nn <- clusterCells(sce, use.dimred="PCA",
+        BLUSPARAM=TwoStepParam(
+            first=KmeansParam(centers= params$centers[i]),
+            second=NNGraphParam(k=params$k[i])
+        ), full = TRUE
+    ) 
+    return(list(n_clusters = n_distinct(km_nn$clusters), clusters = I(list(km_nn$clusters))))
+  }, mc.cores = detectCores()-1)
+    #+ fewer k centroids >> clusters
+    #+ more knn centers < clusters
+    
+  # params$n_clusters[i] <- n_distinct(km_nn$clusters)
+  # params$clusters[i] <- I(list(km_nn$clusters))
+  
+  params$n_clusters[1:length(param_results)]  <- sapply(param_results, `[[`, 1)
+  params$clusters[1:length(param_results)]  <- sapply(param_results, `[[`, 2)
+  
+  # save params 
+  # qsave(params, paste0(wd_path, "processed_data/diff_clustering_params_results_ISOS_LOC_CEN_JF.rds"))
+  qsave(params, paste0(wd_path, "processed_data/diff_clustering_params_results_1.rds"))
+
+};how.long() # ~1min w 48 params
+
+
+# read in params filled with clusters
+filled_params <- qread(paste0(wd_path, "processed_data/diff_clustering_params_results_1.rds"))
+
+```
+
+
+## ITERATE THROUGH CLUSTER ITERATIONS AND CALCULATE TREE 
+```{r}
+
+# for each iteration of filled_params, calculate tree and save to one tree df
+how.long(T);
+  line_data_pseudoprog_l <- mclapply(1:nrow(filled_params), function(ith){
+    
+    # add clusters as labels
+    colLabels(sce) <- filled_params$clusters[[ith]]
+    
+    # find cluster means for each var
+    a_by.cluster <-  aggregateAcrossCells(sce , use.assay.type = "pmm_imp_of_scaled", ids = sce$label )
+    
+    # PCA centroids
+    a_centroids_pca <- reducedDim(a_by.cluster, "PCA")
+    
+    # make MST between clusters based on PCA cluster centroids
+    a_mst_pca <- createClusterMST(a_centroids_pca, clusters=NULL)
+    
+    # edge dataframe with x,y
+    a_line_data <- reportEdges(a_by.cluster, mst=a_mst_pca, clusters=NULL, use.dimred="TSNE")
+    
+    # map cells to nearest edge
+    a_map.tscan_tsne <- mapCellsToEdges(sce, mst=a_mst_pca, use.dimred= "PCA")
+    
+    # order cells based on sequence of edges
+    a_tscan.pseudo_tsne <- orderCells(a_map.tscan_tsne, a_mst_pca)
+  
+    # calculate pseudotime based on position in trajectory
+    a_pseudoprog <- averagePseudotime(a_tscan.pseudo_tsne)
+    
+    # add var of what iteration
+    a_line_data$ith <- ith
+    
+    # remove to save space
+    rm("a_by.cluster")
+    
+    return(list(line_data = a_line_data, pseudoprog = a_pseudoprog))
+  }, mc.cores = detectCores()-1);
+how.long()# 2.3s(35parms); 5s(101params)
+
+# add pseudotimes to filled_params
+filled_params$pseudotime <- lapply(line_data_pseudoprog_l, `[[`, 2)
+
+# make one line_data df; add n_clusters
+line_data <- line_data_pseudoprog_l %>% 
+  lapply(`[[`, 1) %>% 
+  do.call(rbind, .) %>% 
+  left_join(filled_params %>% select(n_clusters, ith) )
+
+```
+
+#### plot different trajectories and PPs
+```{r}
+
+# ****** FUNCTION : take a vector and normalize to lie between closed interval of 0 and 1
+norm_0_1 <- function(vec, buffer = 0.01, rightclosed = TRUE, leftclosed = TRUE) {
+  # Ensure the buffer is non-negative
+  if (buffer < 0) stop("Buffer must be non-negative.")
+  
+  Min <- min(vec)
+  Max <- max(vec)
+  
+  range_diff <- Max - Min
+  adj <- (buffer * range_diff)
+  
+  # Adjust range to include buffer
+  adj_min <- if (leftclosed) Min - adj else Min
+  adj_max <- if (rightclosed) Max + adj else Max
+  
+  # Normalize
+  normalized <- (vec - adj_min) / (adj_max - adj_min)
+  
+  # Ensure the output lies within [0, 1]
+  normalized[normalized < 0] <- 0
+  normalized[normalized > 1] <- 1
+  
+  return(normalized)
+}
+x <- sort(unique(line_data$n_clusters))
+# x %>% 
+#   inv() %>% 
+#   norm_0_1(buffer = .3) 
+table(line_data$n_clusters)
+
+# # sample teh same amount of each cluster count
+# c_inds <- sapply(as.character(unique(line_data$n_clusters)), function(c) which(line_data$n_clusters == c))
+# c_inds_sample <- lapply(c_inds, function(v) sample(v, 10)) %>% unlist()
+# line_data_sub <- line_data[c_inds_sample, ]
+line_data$n_clusters <- as.numeric(line_data$n_clusters)
+line_data$group = paste(line_data$edge, line_data$ith, sep= "_")
+
+# plot all trees overlapping 
+# trees <- 
+  ggplot()+
+  geom_point(data = reducedDim(sce, "TSNE"), 
+             aes(TSNE1, TSNE2,
+                 # color = as.numeric(original_clustering_sce$my_cluster)
+             ), 
+             color = "grey",
+             alpha = .3)+
+    # scale_color_manual(values = cluster_cols)+
+  geom_line(data = line_data %>% filter(n_clusters>0)  , 
+            aes(round(TSNE1,1), round(TSNE2, 1), group = group, 
+                # color = sqrt(1/n_clusters)
+                ),
+            alpha = .1,
+            linewidth = 2, linetype = 1)+
+    scale_color_viridis_c(option = "plasma")+
+  ggtitle(paste("MST trajectories over", max(filled_params$ith), "iterations"))+
+  theme_bw()+
+  theme(aspect.ratio = 1)
+  
+ggplot()+
+  geom_density2d_filled(data = line_data, aes(TSNE1,TSNE2))+
+  geom_point(data = reducedDim(sce, "TSNE"), aes(TSNE1, TSNE2), col = "grey", alpha = .3 , shape = 5)+
+  ggtitle("Centroid density")+
+  theme_bw()
+
+# see how pseudotimes correlate across different clusterings
+pseudotime_d <-
+  filled_params %>% 
+  select(pseudotime) %>% 
+  t() %>% 
+  sapply(unlist) %>% 
+  as.data.frame() %>% 
+  rename_with(~as.character(filled_params$ith)) %>% 
+  rownames_to_column("sample")
+
+# calculate stats on new PPs
+pseudotime_d$rowSDs <- rowSds(as.matrix(pseudotime_d %>% select(where(is.numeric))))
+pseudotime_d$rowVars <- rowVars(as.matrix(pseudotime_d %>% select(where(is.numeric))))
+pseudotime_d$rowMeans <- rowMeans(as.matrix(pseudotime_d %>% select(where(is.numeric))))
+pseudotime_d$rowMeds <- rowMedians(as.matrix(pseudotime_d %>% select(where(is.numeric))))
+
+# grab tsnes and new PPs
+tsne <- reducedDim(sce, "TSNE") %>% 
+  as.data.frame() %>% 
+  rownames_to_column("sample") %>% 
+  left_join(pseudotime_d)
+
+
+# for each stat, plot TNSE colored by stat
+plots <- lapply(c("rowMeans", "rowMeds","rowSDs", "rowVars"), function(stat){
+  
+  # limit <- if(stat != "rowSDs") c(0, max(as.matrix(select(pseudotime_d,matches("\\d"))) ) ) else c(min(tsne[, stat]), max(tsne[,stat]))
+  plot <-  ggplot()+
+    geom_point(data = tsne, aes(TSNE1, TSNE2, color = !!sym(stat)))+
+    geom_density2d(data = line_data, aes(TSNE1,TSNE2), linewidth = 1, linetype = 1, col = "coral")+
+    # scale_color_viridis_c(limits = limit)+
+    scale_color_viridis_c()+
+    theme_bw()+
+    ggtitle("Centroid density with statistic of pseudotime across different iterations")+
+    labs(color = stat)+
+    theme(aspect.ratio = 1)
+})
+
+# save grid of stat plots
+plot_grid <- (plots[[1]]+plots[[2]])/ ( plots[[3]]+plots[[4]])
+
+sprintf("%sresults/clustering/09_clustering/robustness_test/",wd_path) %>% 
+  {if(!dir.exists(.)){dir.create(.)}}
+
+ggsave(paste0( wd_path, "results/clustering/09_clustering/robustness_test/centroid_dens_pp_stat_plots.png"),plot_grid,height = 10, width = 30 )
+
+
+# plot the relationship between the original trajectory pp to all others (original is 1)
+png(paste0( wd_path, "results/clustering/09_clustering/robustness_test/originalPP_versus_other_trajectories.png"), height = 2e3, width = 2e3)
+par(mfrow = c(6,6))
+for(i in 1:36 ){
+  
+  # note: tsne 1 is original clustering 
+  pp <- tsne[,as.character(i)] 
+  n_clusters <- filled_params$n_clusters[filled_params$ith == i]
+  plot(tsne$`1`~pp, xlab = paste("iteration",i), main = paste(n_clusters, "clusters"), cex = .1, pch= 3, col = rgb(0,0,0,.4))
+  
+  }
+par(mfrow = c(1,1))
+dev.off()
+
+```
+
+
+## 'Average'  trajectories
+### use kmeans to find centroid centroids and then calculate new MST
+```{r}
+
+######      ######      ######      
+# GRAPH OF EYE TRAJECTORIES ----
+######      ######      ######      
+
+# longitud_edges <- as.data.frame(colData(manipulated_objects$longitudinal_obj$singleCellExperiment)) %>%
+#   select(patID_eye, month, label) %>%
+#   arrange(patID_eye , month) %>%
+#   group_by(patID_eye) %>%
+#   mutate(current_clust = as.numeric(label),
+#          next_clust = as.numeric(lead(label))) %>%
+#   drop_na(next_clust) %>%
+#   ungroup()
+# 
+# 
+# # make edges list
+# edge_list <- longitud_edges %>%
+#   select(current_clust, next_clust)
+# 
+# # # weighted adjacency matrix
+# # longitud_adj <- as.matrix(as_adjacency_matrix(graph_from_edgelist(as.matrix(edge_list))))
+# # my.map(longitud_adj)
+# 
+# # filter for distinct edges
+# edge_list_filtered <- edge_list %>%
+#   filter(current_clust!=next_clust) %>%
+#   distinct() %>%
+#   as.matrix()
+# 
+# # graph of distinct edges
+# longitud_graph <- graph_from_edgelist(edge_list_filtered, directed = TRUE)
+# 
+# # plot graph of distinct edges
+# plot(longitud_graph,
+#      edge.arrow.size = .4,
+#      edge.arrow.width = 1
+#      )
+
+######      ######      ######      
+# PLOT ALL TREES ----
+
+# # plot trees, excluding original
+# ggplot()+
+#   geom_point(data = reducedDim(sce, "TSNE"), aes(TSNE1, TSNE2, color = sce$my_cluster), alpha = .1)+
+#   geom_line(data = line_data[line_data$ith != 1 , ] , 
+#             aes(TSNE1, TSNE2, group = edge), col = 'black',  alpha = .4, linewidth = 3, linetype = 1)+
+#   geom_line(data = manipulated_objects$longitudinal_obj$trajectoryLineData, aes(TSNE1,TSNE2, group = edge), col = "black", alpha = .3, linewidth = 3 )+
+#   geom_line(data = manipulated_objects$singleton_obj$trajectoryLineData, aes(TSNE1,TSNE2, group = edge),    col = "black", alpha = .3, linewidth = 3 )+
+#   ggtitle(paste("MST trajectories over", max(filled_params$ith), "iterations"))+
+#   theme_bw()+
+#   theme(aspect.ratio = 1)
+
+# # combine tree data into one df; add necessary ids
+# longitud_tree <- manipulated_objects$longitudinal_obj$trajectoryLineData %>% 
+#   mutate (ith = max(line_data$ith)+1, n_clusters = n_distinct(TSNE1,TSNE2)) %>% 
+#   mutate(type = "filtered")
+# singleton_tree <- manipulated_objects$singleton_obj$trajectoryLineData %>%
+#   mutate (ith = max(line_data$ith)+2, n_clusters = n_distinct(TSNE1,TSNE2)) %>%
+#    mutate(type = "filtered")
+# 
+# # join all together; add identifier for what data was used to compute centroids
+# all_trees <- line_data %>% 
+#   mutate(type = "iterated") %>% 
+#   rbind(longitud_tree) %>%
+#   rbind(singleton_tree) %>%
+#   mutate(edge2 = edge) %>% 
+#   separate(edge2, into = c("node1", "node2"), sep = "--", convert = TRUE)
+
+# look at just iterated line data
+all_trees <- line_data %>% 
+  mutate(type = "iterated") %>%
+  mutate(edge2 = edge) %>%
+  separate(edge2, into = c("node1", "node2"), sep = "--", convert = TRUE)
+
+# all trees overlayed
+ggplot()+
+  geom_point(data = reducedDim(sce, "TSNE"), aes(TSNE1, TSNE2, color = sce$my_cluster), alpha = .3)+
+  scale_color_manual(values = cluster_cols)+
+  geom_line(data = all_trees, aes(TSNE1,TSNE2, group = group),color = "black", alpha = .3, linewidth = 1.5)+
+  theme_bw()+
+  ggtitle("MST of Multiple Clustering Iterations Overlayed on TSNE Clusters")+
+  labs(color = "Cluster")+
+  guides(color = guide_legend(override.aes = list(alpha = 1)))+
+  theme(aspect.ratio = 1)
+ggsave(paste0(wd_path, "results/publication_figures/mst_spider_web_overlay.pdf"),width = 10,height = 10, limitsize = TRUE)
+
+######      ######      ######      ######      
+# MAKE MST OF CLUSTER CENTROIDS KM CENTROIDS ----
+######      ######      ######      ######      
+
+# data for edge points of iteration centroids
+
+## type of tree to plot MST on 
+# tree_type = "filtered"
+tree_type = "iterated"
+
+## filter for tree type and exclude first iteration b/c original
+points <- all_trees %>%
+  # filter(ith != 1) %>%
+  filter(type ==tree_type) %>%
+  select(TSNE1, TSNE2) %>%
+  mutate(id = row_number())
+
+# kmeans on mst centroids
+# seeds <- c()
+# seed <- sample(1:1e6, 1)
+# set.seed(seed)
+# seeds <- c(seeds,seed)
+
+
+# num_centers <- 8; set.seed(834) # or 642565 for 8 centroids
+num_centers <- 11; set.seed(834) # or 642565 for 
+# num_centers <- 8; set.seed(685349) # or 642565 for 8 centroids
+# num_centers <- 7; set.seed(198323) # for 7 centroids
+
+km_params <- data.frame(seeds = c(834, 685349, 198323, 1029, 9304, 2049, 2049, 2049, 2049, 2049), 
+                        centers = c(11,8,7, 6, 12, 10,9, 15, 18, 20))
+km_params <- km_params[order(km_params$centers), ]
+
+km_plots <- lapply(1:nrow(km_params) , function(i){
+  
+  num_centers <- km_params$centers[i]
+  
+  
+  set.seed(km_params$seeds[i])
+  centroid_clusters <- kmeans(points[, c("TSNE1", "TSNE2")], num_centers)
+  # centroid_clusters <- dbscan(dist(points[, c("TSNE1", "TSNE2")]), eps = 3,minPts = 30)
+  
+  # extract centroids data
+  centers <- 
+    centroid_clusters$centers %>%
+    # cbind(points[, c("TSNE1", "TSNE2")], cluster = centroid_clusters$cluster )%>% 
+    # summarize(across(TSNE1:TSNE2, ~mean(.)), .by = cluster) %>% 
+    as.data.frame() %>% 
+    rownames_to_column("id") %>% 
+    mutate(id = as.numeric(id))
+  
+  # # plot km centroids over iterated centroids
+  # ggplot()+
+  #   geom_point(data = reducedDim(sce, "TSNE"), 
+  #              aes(TSNE1, TSNE2),color = "grey", alpha = .1)+
+  #   geom_density_2d(data = points, 
+  #                   aes(TSNE1, TSNE2),color = "blue", alpha = .3)+
+  #   geom_point(data = points, 
+  #              aes(TSNE1, TSNE2, color = factor(centroid_clusters$cluster)),
+  #              shape = 3, show.legend = FALSE)+
+  #   geom_point(data = centers, aes(TSNE1, TSNE2), shape = 10, size = 4)+
+  #   theme_bw()+
+  #   theme(aspect.ratio = 1)
+  
+  # Calculate distance matrix 
+  dist_matrix <- as.matrix(dist(centers))
+  
+  # Create a complete graph from the distance matrix
+  g <- graph_from_adjacency_matrix(dist_matrix, mode = "undirected", weighted = TRUE)
+  
+  # Generate the Minimum Spanning Tree (MST)
+  mst <- igraph::mst(g,algorithm = "prim")
+  
+  # Extract edges and format them for plotting
+  edges <- igraph::as_data_frame(mst, what = "edges") %>% 
+    mutate_all(~as.numeric(.))
+  
+  # Join the points data to get coordinates for each edge
+  edges <- edges %>%
+    left_join(centers, by = c("from" = "id")) %>%
+    dplyr::rename(TSNE1_from = TSNE1, TSNE2_from = TSNE2)%>%
+    left_join(centers, by = c("to" = "id")) %>%
+    dplyr::rename(TSNE1_to = TSNE1, TSNE2_to = TSNE2)
+  
+  # Plot the kmcenters and the MST with branches
+  plot <- ggplot() +
+    geom_point(data = reducedDim(sce, "TSNE"), aes(TSNE1, TSNE2),color = "grey", alpha = .1)+
+    geom_density_2d(data = all_trees %>%filter(ith != 1) %>%filter(type == tree_type), aes(x = TSNE1, y = TSNE2), alpha = .4 ) + # not colored
+    # geom_point(data = all_trees %>%filter(ith != 1) %>%filter(type == tree_type), aes(x = TSNE1, y = TSNE2, color = factor(ith))) + # colored
+    # geom_point(data = all_trees %>%filter(ith != 1) %>%filter(type == tree_type), aes(x = TSNE1, y = TSNE2)) + # not colored
+    geom_point(data = points, aes(TSNE1, TSNE2, color = factor(centroid_clusters$cluster)))+
+    # geom_point(data = all_trees %>% filter(ith == 1), aes(x = TSNE1, y = TSNE2), color = "black", size = 3, shape =4) +
+    geom_segment(data = edges, aes(x = TSNE1_from, y = TSNE2_from, xend = TSNE1_to, yend = TSNE2_to), color = "darkblue") +
+    geom_point(data = centers, aes(TSNE1, TSNE2), shape = 17, color = "coral", size = 6)+
+    labs(title = paste("MST of", tree_type,"data centroids and their k-means centroids") ,
+         color = "Cluster",
+         x = "TSNE1",
+         y = "TSNE2")+
+    theme_bw()+
+    theme(aspect.ratio = 1)+
+    geom_blank()
+  
+  # ggsave(sprintf("%sresults/clustering/09_clustering/robustness_test/%s_km_centroids_of_centroids.png",wd_path,km_params$centers[i] ),plot, height = 10, width = 12)
+  
+  return(plot)
+  
+  })
+
+p <- patchwork::wrap_plots(plotlist = km_plots[1:3], ncol = 3)
+
+ggsave(sprintf("%sresults/clustering/09_clustering/robustness_test/km_centroids_of_centroids_grid.png",wd_path ),p,height = 8, width = 24)
+
+ggsave(paste0(wd_path, "results/publication_figures/km_centroids_of_centroids_grid.pdf"), p,width = 21,height = 7, limitsize = TRUE)
+
+```
+
+#____________________
+
+
+# Does the Bifurcation hold up when clustering with OG params and fewer points?
+## FUNCTION: ORIG clustering/trajectory pipeline; + PCA and TSNE 
+```{r}
+
+tsne_params <- metadata(sce)$params$tsne
+km_nn_params <- metadata(sce)$params$km_nn
+
+# ****** FUNCTION : cluster and trajectory analysis to give original clustering/trajectory; reduce dimensions of specified assay
+og_pipeline <- function(an_sce, assay_name, 
+                        runPCA = FALSE, 
+                        runTSNE = FALSE, 
+                        tsne_final_momentum = tsne_params$final_momentum, 
+                        tsne_momentum = tsne_params$momentum, 
+                        tsne_eta = tsne_params$eta, 
+                        tsne_exageration_factor = tsne_params$exaggeration_factor, 
+                        tsne_perplexity = tsne_params$perplexity, 
+                        tsne_theta = NULL, 
+                        tnse_seed = tsne_params$seed,
+                        clust_seed = km_nn_params$seed,
+                        clust_centers = km_nn_params$centers,
+                        clust_k = km_nn_params$k){
+  
+  how.long(T)
+  # REDUCED DIMS ---
+  if(runPCA){
+    # clear any existing reduced dimensions
+    reducedDim(an_sce, "PCA") <- NULL
+    
+    # calculate  PCs and TSNE
+    an_sce <- runPCA(an_sce,exprs_values = assay_name )
+  }
+  if(runTSNE){
+    # clear any existing reduced dimensions
+    reducedDim(an_sce, "TSNE") <- NULL
+    # dynamic argument list
+    tsne_args <- list(an_sce, dimred = "PCA")
+    if (!is.null(tsne_perplexity)) tsne_args$perplexity <- tsne_perplexity
+    if (!is.null(tsne_theta)) tsne_args$theta <- tsne_theta
+    
+    # Run t-SNE with dynamically constructed arguments
+    set.seed(tnse_seed)
+    an_sce <- do.call(runTSNE, tsne_args)
+  }
+  
+  # CLUSTERING ----------
+  set.seed(clust_seed)
+  km_nn <- clusterCells(an_sce, use.dimred="PCA",
+      BLUSPARAM=TwoStepParam(
+          first=KmeansParam(centers=clust_centers),
+          second=NNGraphParam(k=clust_k)
+      ), full = TRUE
+  ) 
+  
+  # add clusters as labels
+  colLabels(an_sce) <- km_nn$clusters
+  
+  # TRAJECTORY CALC ----
+  # find cluster means for each var
+  a_by.cluster <-  aggregateAcrossCells(an_sce , use.assay.type = assay_name, ids = an_sce$label )
+  
+  # PCA centroids
+  a_centroids <- reducedDim(a_by.cluster, "PCA")
+  
+  # make MST between clusters based on PCA cluster centroids
+  a_mst <- createClusterMST(a_centroids, clusters=NULL)
+  
+  # edge dataframe with x,y
+  line_data_pca <- reportEdges(a_by.cluster, mst=a_mst, clusters=NULL, use.dimred="PCA")
+  if(runTSNE){
+    line_data_tsne <- reportEdges(a_by.cluster, mst=a_mst, clusters=NULL, use.dimred="TSNE")
+  }else{
+    line_data_tsne <-NULL
+  }
+  
+  # map cells to nearest edge
+  a_map.tscan <- mapCellsToEdges(an_sce, mst=a_mst, use.dimred= "PCA")
+  
+  # order cells based on sequence of edges
+  a_tscan.pseudo <- orderCells(a_map.tscan, a_mst)
+
+  # calculate pseudotime based on position in trajectory
+  a_pseudoprog <- averagePseudotime(a_tscan.pseudo)
+  
+  # add pseudoprog to sce
+  an_sce$pseudoprog <- a_pseudoprog
+  
+  how.long()
+  
+  return(list(singleCellExperiment = an_sce, 
+              trajectoryLineData = list(pca = line_data_pca, tsne = line_data_tsne))
+         )
+  
+}
+# test_sce_pipeline <- og_pipeline(sce)
+# test_sce <- test_sce_pipeline$singleCellExperiment
+# plotReducedDim(test_sce, "TSNE", color_by = "pseudoprog")
+
+```
+
+## look at trajectory when filtering/manipulating assay
+  
+    switch to run following chunks
+```{r, eval=TRUE}
+
+run_manipulate_objects <- TRUE
+
+```
+
+
+#### FILTERING OUT EYES: SINGLETONS AND MULTIVISITS 
+```{r, eval=TRUE}
+
+# what eyes have >1 visit
+longitudinal_eyes <- as.data.frame(colData(sce)) %>% 
+  filter(n()>1, .by = patID_eye) %>% 
+  pull(patID_eye)
+
+# for single visits; first visits
+singletons <-  as.data.frame(colData(sce)) %>% 
+  select(patID_eye, sample, month) %>% 
+  arrange(patID_eye,month) %>% 
+  filter(row_number( ) == 1, .by = patID_eye) %>% 
+  pull(sample)
+
+# switch to run pipeline on singlton and longitudinal eyes
+
+# run pipeline on longitudinal  eyes
+if(run_manipulate_objects){
+  # run pipeline
+  longitudinal_obj =  og_pipeline(sce[, sce$patID_eye %in% longitudinal_eyes], assay_name = "pmm_imp_of_scaled", runPCA = TRUE)
+  # save data  individually
+  if(!dir.exists(paste0(wd_path, "processed_data/longitudinal_sce_objects/"))) dir.create(paste0(wd_path, "processed_data/longitudinal_sce_objects/"))
+    qsave(longitudinal_obj$trajectoryLineData, paste0(wd_path, "processed_data/longitudinal_sce_objects/trajectoryLineData.rds"))
+    saveHDF5SummarizedExperiment(longitudinal_obj$singleCellExperiment, paste0(wd_path, "processed_data/longitudinal_sce_objects/singleCellExperiment.h5"),replace=TRUE)
+}else{  
+  longitudinal_obj <- list(trajectoryLineData= qread(paste0(wd_path, "processed_data/longitudinal_sce_objects/trajectoryLineData.rds")),
+                    singleCellExperiment = loadHDF5SummarizedExperiment(paste0(wd_path, "processed_data/longitudinal_sce_objects/singleCellExperiment.h5")))
+  }
+ # >> 22s
+
+# run pipeline on singletons
+if(run_manipulate_objects){
+  # run pipeline
+  singleton_obj = og_pipeline(sce[, sce$sample %in% singletons], assay_name = "pmm_imp_of_scaled", runPCA = TRUE)
+  
+  # save data  individually
+  if(!dir.exists(paste0(wd_path, "processed_data/singleton_objects/"))) dir.create(paste0(wd_path, "processed_data/singleton_objects/"))
+  qsave(singleton_obj$trajectoryLineData, paste0(wd_path, "processed_data/singleton_objects/trajectoryLineData.rds"))
+  saveHDF5SummarizedExperiment(singleton_obj$singleCellExperiment, paste0(wd_path, "processed_data/singleton_objects/singleCellExperiment.h5"),replace=TRUE)
+}else{  
+  singleton_obj <- list(trajectoryLineData= qread(paste0(wd_path, "processed_data/singleton_objects/trajectoryLineData.rds")),
+                    singleCellExperiment = loadHDF5SummarizedExperiment(paste0(wd_path, "processed_data/singleton_objects/singleCellExperiment.h5")))
+  }
+# >> 33s
+
+```
+
+
+#### RANDOMLY REMOVE N samples
+```{r, eval=TRUE}
+
+# number of observations to remove to remove from teh data
+ratios_to_keep <- seq(.40,.90,.10)
+ns <- floor(ncol(sce) * ratios_to_keep)
+
+# make directory to save all of the objects
+if(!dir.exists(paste0(wd_path, "processed_data/sampled_objects/"))) dir.create(paste0(wd_path, "processed_data/sampled_objects/"))
+
+# for each partition of the data, sample random eyes and run pipeline on those
+if(run_manipulate_objects){
+  for(i in 1:length(ns)){
+    # random samples: sample n amount of samples to keep in assay 
+    set.seed(2038)
+    random_eyes <- sample(sce$sample, ns[i], F) 
+    ratio = ratios_to_keep[i]
+    
+    # run pipeline on sampled assay
+      
+      # run pipeline
+      sampled_obj = og_pipeline(sce[, sce$sample %in% random_eyes], assay_name = "pmm_imp_of_scaled", runPCA = TRUE)
+      
+      # specific object directory by sample size
+      dir_name <- paste0("processed_data/sampled_objects/",ratio,"_sampled_objects/")
+      
+      # save data  individually
+      if(!dir.exists(paste0(wd_path, dir_name))) dir.create(paste0(wd_path, dir_name))
+      
+      qsave(sampled_obj$trajectoryLineData, paste0(wd_path, dir_name, "trajectoryLineData.rds"))
+      saveHDF5SummarizedExperiment(sampled_obj$singleCellExperiment, paste0(wd_path, dir_name, "singleCellExperiment.h5"),replace=TRUE)
+    
+    print(i)
+    
+  } # >> 19+24+30+35+41+48 = 3.5 min
+} 
+
+rm("sampled_obj")
+
+# read in sampled objects to list
+files <- dir(paste0(wd_path, "processed_data/sampled_objects/"))
+
+# file = "0.5_sampled_objects"
+
+sampled_objects_list <- list()
+for(file in files){
+  
+  # rename so no number at start of object
+  new_name <- paste("sampled_obj", str_split(file, "_", simplify = TRUE)[[1]], sep = "_")
+  
+  a_sampled_object_list <- list(trajectoryLineData= qread(paste0(wd_path, "processed_data/sampled_objects/", file, "/trajectoryLineData.rds")),
+                    singleCellExperiment = loadHDF5SummarizedExperiment(paste0(wd_path, "processed_data/sampled_objects/", file,"/singleCellExperiment.h5"))  )
+  
+  sampled_objects_list[[new_name]] <- a_sampled_object_list
+}
+
+```
+
+
+#### ADD GAUSSIAN NOISE TO ASSAY
+```{r, eval=TRUE}
+
+# random noise
+set.seed(2108)
+noise <- matrix(  rnorm(length(assays(sce)$pmm_imp_of_scaled),mean = 0, sd = .5), 
+  ncol = ncol(assays(sce)$pmm_imp_of_scaled), 
+  nrow = nrow(assays(sce)$pmm_imp_of_scaled)
+  )
+
+dim(noise)
+dim(assays(sce)$pmm_imp_of_scaled)
+
+
+# add noise to object
+assays(sce)$noisey <- as.matrix(assays(sce)$pmm_imp_of_scaled) + noise
+
+# run pipeline on noisey assay
+if(run_manipulate_objects){
+  # run pipeline
+  noisey_obj <-  og_pipeline(sce, assay_name = "noisey", runPCA = TRUE)
+  
+  # save data  individually
+  if(!dir.exists(paste0(wd_path, "processed_data/noisey_sce_objects/"))) dir.create(paste0(wd_path, "processed_data/noisey_sce_objects/"))
+  
+  qsave(noisey_obj$trajectoryLineData, paste0(wd_path, "processed_data/noisey_sce_objects/trajectoryLineData.rds"))
+  saveHDF5SummarizedExperiment(noisey_obj$singleCellExperiment, paste0(wd_path, "processed_data/noisey_sce_objects/singleCellExperiment.h5"),replace=TRUE)
+  
+}else{  
+  noisey_obj <- list(trajectoryLineData= qread(paste0(wd_path, "processed_data/noisey_sce_objects/trajectoryLineData.rds")),
+                    singleCellExperiment = loadHDF5SummarizedExperiment(paste0(wd_path, "processed_data/noisey_sce_objects/singleCellExperiment.h5"))
+                     )
+  }
+ # >> 1min
+
+```
+
+
+#### REMOVE VA FROM ASSAY 
+```{r, eval=TRUE}
+## filter out va vars
+structure_sce <- sce
+structure_sce <- structure_sce[!rownames(structure_sce) %in% grep("^RW\\d.*$", rownames(structure_sce), value = TRUE) ,]
+
+# run pipeline on structure assay
+if(run_manipulate_objects){
+  # run pipeline
+  structure_obj <- og_pipeline(structure_sce, assay_name = "pmm_imp_of_scaled", runPCA = TRUE)
+  
+  # save data  individually
+  if(!dir.exists(paste0(wd_path, "processed_data/structure_sce_objects/"))) dir.create(paste0(wd_path, "processed_data/structure_sce_objects/"))
+  
+  qsave(structure_obj$trajectoryLineData, paste0(wd_path, "processed_data/structure_sce_objects/trajectoryLineData.rds"))
+  saveHDF5SummarizedExperiment(structure_obj$singleCellExperiment, paste0(wd_path, "processed_data/structure_sce_objects/singleCellExperiment.h5"),replace=TRUE)
+  
+}else{  
+  structure_obj <- list(trajectoryLineData= qread(paste0(wd_path, "processed_data/structure_sce_objects/trajectoryLineData.rds")),
+                    singleCellExperiment = loadHDF5SummarizedExperiment(paste0(wd_path, "processed_data/structure_sce_objects/singleCellExperiment.h5"))
+                     )
+  }
+# >> 53 s
+
+```
+
+
+#### REMOVE STRUCTURE FEATURES FROM ASSAY 
+<!-- ```{r, eval=FALSE} -->
+<!-- -->
+<!-- ## filter out va vars -->
+<!-- VA_sce <- sce -->
+<!-- VA_sce <- VA_sce[rownames(VA_sce) %in% grep("^RW\\d.*$", rownames(VA_sce), value = TRUE) ,] -->
+<!-- -->
+<!-- # run pipeline on structure assay -->
+<!-- how.long(clear = TRUE) -->
+<!-- if(run_VA_object){ -->
+<!--   # run pipeline -->
+<!--   VA_obj <- og_pipeline(VA_sce, assay_name = "pmm_imp_of_scaled", runPCA = TRUE) -->
+<!-- -->
+<!--   # save data  individually -->
+<!--   if(!dir.exists(paste0(wd_path, "processed_data/VA_sce_objects/"))) dir.create(paste0(wd_path, "processed_data/VA_sce_objects/")) -->
+<!-- -->
+<!--   qsave(VA_obj$trajectoryLineData, paste0(wd_path, "processed_data/VA_sce_objects/trajectoryLineData.rds")) -->
+<!--   saveHDF5SummarizedExperiment(VA_obj$singleCellExperiment, paste0(wd_path, "processed_data/VA_sce_objects/singleCellExperiment.h5"),replace=TRUE) -->
+<!-- -->
+<!-- }else{ -->
+<!--   VA_obj <- list(trajectoryLineData= qread(paste0(wd_path, "processed_data/VA_sce_objects/trajectoryLineData.rds")), -->
+<!--                     singleCellExperiment = loadHDF5SummarizedExperiment(paste0(wd_path, "processed_data/VA_sce_objects/singleCellExperiment.h5")) -->
+<!--                      ) -->
+<!--   } -->
+<!-- how.long() # >> 1.6 min -->
+<!-- ``` -->
+
+#### PUT OBJECTS IN LIST 
+```{r, eval=TRUE}
+
+if(run_manipulate_objects){
+  manipulated_objects <- list(
+    original_obj = og_pipeline(sce, assay_name = "pmm_imp_of_scaled", runPCA = FALSE),
+    longitudinal_obj = longitudinal_obj,
+    singleton_obj =singleton_obj,
+    noisey_obj = noisey_obj,
+    sampled_obj_0.4 = sampled_objects_list$sampled_obj_0.4, 
+    sampled_obj_0.5 = sampled_objects_list$sampled_obj_0.5, 
+    sampled_obj_0.6 = sampled_objects_list$sampled_obj_0.6, 
+    sampled_obj_0.7 = sampled_objects_list$sampled_obj_0.7, 
+    sampled_obj_0.8 = sampled_objects_list$sampled_obj_0.8, 
+    sampled_obj_0.9 = sampled_objects_list$sampled_obj_0.9, 
+    structure_obj= structure_obj
+  )
+  
+  # save  
+  qsave(manipulated_objects, sprintf("%sprocessed_data/clustering_robustness_manipulated_objects_list.qs", wd_path))
+  
+  # remove this because in the manipulated objects list
+  rm_objects <- c("sampled_objects_list", "structure_sce", "VA_sce", "noisey_obj", "structure_obj", "VA_obj", "singleton_obj", "longitudinal_obj")
+  rm(list = rm_objects[rm_objects%in%ls()])
+  
+  
+}else{
+  manipulated_objects <- qread(sprintf("%sprocessed_data/clustering_robustness_manipulated_objects_list.qs", wd_path))
+}
+
+```
+
+
+<!-- #### function to scale 60% plot to make hidden edge visible -->
+<!-- ```{r, eval = FALSE} -->
+
+<!-- # grab TSNE and cluster data for sample_data_.6 -->
+<!-- eye_filter_name <- "60% of data" -->
+<!-- tsne <- reducedDim(manipulated_objects$sampled_obj_0.6$singleCellExperiment,"TSNE")%>%  -->
+<!--   as.data.frame() -->
+<!-- tsne$my_cluster = colLabels(manipulated_objects$sampled_obj_0.6$singleCellExperiment) -->
+
+
+<!-- # manipulate TNSE1 to make an edge more visible -->
+<!-- # NULL function -->
+<!-- scale_func <- function(x) return(x) -->
+
+
+<!-- # # piecewise transformation stretches space where lessthn 5 by rational root -->
+<!-- # scale_func <- function(x) { -->
+<!-- #   # where <- abs(x)<5 -->
+<!-- #   where <- rep(TRUE, length(x)) -->
+<!-- #   x[where] <- sign(x[where]) * abs(x[where])^(1/1.3) -->
+<!-- #   return(x) -->
+<!-- # } -->
+<!-- #  -->
+<!-- # # hyperbolic smoothing -->
+<!-- # scale_func <- function(x){ -->
+<!-- #   # where <- abs(x)<1 -->
+<!-- #   # x[where] <- tanh(x[where] / max(abs(x[where]))) * max(abs(x[where])) -->
+<!-- #   # p <- 2 -->
+<!-- #   # x <- (x^p) * sign(x)[sign(x)<0] -->
+<!-- #   x <- tanh(x) -->
+<!-- #   return(x) -->
+<!-- #   } -->
+<!-- # plot(c(-10:10), scale_func(-10:10)) -->
+
+<!-- # logarithmic transformation stretches near zero p amount; p>1 less stretching, p<1, more stretching -->
+<!-- scale_func <- function(x, p = 1.5) { -->
+<!--   x <- (log(1+abs(x)))^p * sign(x) -->
+<!--   return(x) -->
+<!-- } -->
+
+<!-- # Test funciton -->
+<!-- par(mfrow = c(2,5)); for (p in seq(.1,2,.2)){ -->
+<!--   plot(c(-10:10), scale_func(-10:10, p = p), main = sprintf("p=%g", p)) -->
+<!--   }; par(mfrow = c(1,1)) -->
+
+<!-- # plot TSNE -->
+<!-- plot_60_perc <- ggplot(tsne, aes(scale_func(TSNE1),TSNE2, color = factor(my_cluster)))+ -->
+<!--                 theme_bw()+ -->
+<!--                 geom_point()+ -->
+<!--                 scale_color_manual(values = cluster_cols)+ -->
+<!--                 geom_line(data = manipulated_objects$sampled_obj_0.6$trajectoryLineData ,  -->
+<!--                         aes(scale_func(TSNE1), TSNE2, group = edge), col = 'black')+ -->
+<!--                 ggtitle(paste("Trajectory and Pseudoprogression with", eye_filter_name))+ -->
+<!--                 labs(color = "my_cluster")+ -->
+<!--                 theme(aspect.ratio = 1,  -->
+<!--                       title = element_text(face = "bold", size = 12))+ -->
+<!--                 geom_blank()   -->
+
+
+<!-- # tsne_x <- tsne -->
+<!-- # tsne_x[, c("TSNE1","TSNE2")]  <- rotate_points(as.matrix(tsne_x[, c("TSNE1","TSNE2")]) , 270)  -->
+<!-- # tsne_x[, c("TSNE1","TSNE2")] <-mirror(tsne_x[, c("TSNE1","TSNE2")], over = "y") -->
+<!-- # tsne_x[, c("TSNE1","TSNE2")] <-mirror(tsne_x[, c("TSNE1","TSNE2")], over = "x") -->
+<!-- #  -->
+<!-- # ggplot(tsne_x , aes(scale_func(TSNE1),TSNE2, color = factor(my_cluster)))+ -->
+<!-- #                 theme_bw()+ -->
+<!-- #                 geom_point()+ -->
+<!-- #                 scale_color_manual(values = cluster_cols)+ -->
+<!-- #                 # geom_line(data = manipulated_objects$sampled_obj_0.6$trajectoryLineData ,  -->
+<!-- #                 #         aes(scale_func(TSNE1), TSNE2, group = edge), col = 'black')+ -->
+<!-- #                 ggtitle(paste("Trajectory and Pseudoprogression with", eye_filter_name))+ -->
+<!-- #                 labs(color = "my_cluster")+ -->
+<!-- #                 theme(aspect.ratio = 1,  -->
+<!-- #                       title = element_text(face = "bold", size = 12))+ -->
+<!-- #                 geom_blank()   -->
+
+<!-- ``` -->
+
+### plot TSNES
+```{r, eval = TRUE}
+# plot main titles
+eye_filter_names <- data.frame(name = names(manipulated_objects)[-which(names(manipulated_objects)=='structure_obj')],
+                          title = c("original data", "longitudinal eyes", "BL visits", "data with gaussian noise", "40% of data", "50% of data", "60% of data", "70% of data", "80% of data", "90% of data"))
+                                    # , "only structural features"))
+
+eye_filter_names$subheading = rep("coloring with original clusters", nrow(eye_filter_names))
+
+
+# angles to rotate plots with
+# angles <- c(0,100, 0,0,170, -180, -180,100, -10, -190)
+angles <- c(0,rep(0,9))
+pc1_multiples <- c(1,rep(-1,9))
+pc2_multiples <- c(1,rep(-1,5), 1,rep(-1,3))
+# angles <- c(0,rep(180,9))
+
+filtering_trajectory_plots <- list()
+for(i in 1:nrow(eye_filter_names)){
+
+    eye_filter_name <- eye_filter_names[i,2]
+    subheading <- eye_filter_names[i,3]
+
+    # object list
+    a_manipulated_object <- manipulated_objects[[i]]
+
+    # grab pca and tree data; add cluster to pca
+    a_pca <- as.data.frame(reducedDim(a_manipulated_object$singleCellExperiment, "PCA") )
+    
+    # # color with manipulate data clusters
+    # a_pca$my_cluster <- colLabels(a_manipulated_object$singleCellExperiment)
+    
+    # color with original clusters
+    a_pca$my_cluster <- sce$my_cluster[match(rownames(a_pca), colnames(sce))]
+    
+    # grab tree
+    a_tree <- a_manipulated_object$trajectoryLineData$pca
+    
+
+    # grab centroids for labels
+    cluster_labels <- a_pca %>% 
+      group_by(my_cluster) %>% 
+      summarize_all(median)
+      
+    
+    # BESPOKE CHANGES TO PLOTS ----
+    
+    # # for 60% plot, stretch x axis to make a edge more visiible
+    # if(eye_filter_name == "60% of data"){
+    #   a_pca[, c("PCA1","PCA2")] <-rotate_points(a_pca[, c("PCA1","PCA2")] , -120)
+    #   a_tree[, c("PCA1","PCA2")] <-rotate_points(a_tree[, c("PCA1","PCA2")] , -120)
+    #   cluster_labels[, c("PCA1","PCA2")] <-rotate_points(cluster_labels[, c("PCA1","PCA2")] , -120)
+    # }
+
+    
+    # # for gaussian noise plot, rotate -90
+    # if(eye_filter_name %in% c("data with gaussian noise", "80% of data")){
+    # 
+    #   # rotate points
+    #   a_pca[, c("PCA1","PCA2")] <- a_pca[, c("PCA1","PCA2")] %>%
+    #     mirror("y") %>%
+    #     rotate_points(45)
+    # 
+    #   # rotate tree
+    #   a_tree[, c("PCA1","PCA2")] <- a_tree[, c("PCA1","PCA2")] %>%
+    #     mirror("y") %>%
+    #     rotate_points(45)
+    # }
+    
+    # # for 40% plot
+    # if(eye_filter_name %in% c("40% of data")){
+    #   a_pca[, c("PCA1","PCA2")] <-rotate_points(a_pca[, c("PCA1","PCA2")] , 180)
+    #   a_tree[, c("PCA1","PCA2")] <-rotate_points(a_tree[, c("PCA1","PCA2")] , 180)
+    #   cluster_labels[, c("PCA1","PCA2")] <-rotate_points(cluster_labels[, c("PCA1","PCA2")] , 180)
+    # }
+    
+    # # longitudinal plot
+    # if(eye_filter_name %in% c("longitudinal eyes")){
+    #   a_pca[, c("PCA1","PCA2")] <-a_pca[, c("PCA1","PCA2")] %>% 
+    #     rotate_points(90)
+    #   a_tree[, c("PCA1","PCA2")] <-a_tree[, c("PCA1","PCA2")] %>% 
+    #     rotate_points(90)
+    #   cluster_labels[, c("PCA1","PCA2")] <-cluster_labels[, c("PCA1","PCA2")] %>% 
+    #     rotate_points(90)
+    # }
+    
+    # # BL plot
+    # if(eye_filter_name %in% c("BL visits")){
+    #   a_pca[, c("PCA1","PCA2")] <-a_pca[, c("PCA1","PCA2")] %>% 
+    #     rotate_points(-90) %>% 
+    #     mirror(.,'y')  
+    #   a_tree[, c("PCA1","PCA2")] <-a_tree[, c("PCA1","PCA2")] %>% 
+    #     rotate_points(-90) %>% 
+    #     mirror(.,'y') 
+    #   cluster_labels[, c("PCA1","PCA2")] <-cluster_labels[, c("PCA1","PCA2")] %>% 
+    #     rotate_points(-90) %>% 
+    #     mirror(.,'y') 
+    # }
+    
+    # using angles vector
+    a_pca[, c("PC1","PC2")] <-a_pca[, c("PC1","PC2")] %>%
+      rotate_points(.,angles[i]) %>%
+      # mirror(.,'y') %>%
+      {x <- .; x[,1] <- x[,1]*pc1_multiples[i]; x} %>%
+      {x <- .; x[,2] <- x[,2]*pc2_multiples[i]; x} %>% 
+      {.}
+    
+      
+    a_tree[, c("PC1","PC2")] <-a_tree[, c("PC1","PC2")] %>%
+      rotate_points(.,angles[i]) %>%
+      # mirror(.,'y') %>%
+      {x <- .; x[,1] <- x[,1]*pc1_multiples[i]; x} %>% 
+      {x <- .; x[,2] <- x[,2]*pc2_multiples[i]; x} %>% 
+      {.}
+
+    cluster_labels[, c("PC1","PC2")] <-cluster_labels[, c("PC1","PC2")] %>%
+      rotate_points(angles[i]) %>%
+      # mirror(.,'y') %>%
+      {x <- .; x[,1] <- x[,1]*pc1_multiples[i]; x} %>%
+      {x <- .; x[,2] <- x[,2]*pc2_multiples[i]; x} %>% 
+      {.}
+
+    # plot PCA----
+    plot <- ggplot(a_pca, aes(PC1,PC2, color = factor(my_cluster)))+
+                theme_bw()+
+                geom_point(show.legend =FALSE, alpha = .6)+
+                # geom_point(show.legend = FALSE, alpha = .4)+
+                scale_color_manual(values = cluster_cols)+
+                geom_line(data = a_tree, aes(PC1, PC2, group = edge), col = 'black')+
+                geom_label(data = cluster_labels, aes(label = my_cluster, x = PC1, y = PC2), col = "black", alpha = .5)+
+                ggtitle(paste(eye_filter_name), subheading)+
+                labs(color = "Cluster")+
+                theme(aspect.ratio = 1,
+                      title = element_text(face = "bold", size = 12))+
+                geom_blank()
+    
+    # add plot to list
+    filtering_trajectory_plots[[eye_filter_name]] <- plot
+}
+rm("a_manipulated_object")
+
+legend_only <- ( ggplot(a_pca, aes(PC1,PC2 , color = factor(my_cluster)))+
+  scale_color_manual(values = cluster_cols)+
+  labs(color = "my_cluster")+
+  guides(color = guide_legend(ncol = 2))+
+  geom_point()+
+  theme_void() )%>% 
+  cowplot::get_legend() %>% 
+  cowplot::plot_grid()
+
+
+filtering_trajectory_plots <- append(filtering_trajectory_plots, list(legend = legend_only))
+
+
+sub_filtering_trajectory_plots <- filtering_trajectory_plots[c(1:5, 7,9,11)]
+
+# grid of plots
+filtering_trajectory_plots_grid <- patchwork::wrap_plots(sub_filtering_trajectory_plots[-c(2,3)], ncol = 3)
+filtering_trajectory_plots_grid
+
+ggsave(paste0(wd_path, "results/clustering/09_clustering/robustness_test/manipulated_sces_cluster_tree_plots.png"), filtering_trajectory_plots_grid, width = 20, limitsize = TRUE)
+ggsave(paste0(wd_path, "results/publication_figures/manipulated_sces_cluster_tree_plots.pdf"), filtering_trajectory_plots_grid,  width = 15,height = 15, limitsize = TRUE)
+
+```
+
+
+
+# = = = = = = = = = = = 
+# NOT SAVING DATA
+```{r}
+# # save SCE
+# # saveRDS(sce, paste0(wd_path, "processed_data/sce002_robust_test.rds"))
+```
+
+
+<!-- ```{r} -->
+<!-- # Define number of points -->
+<!-- n <- 100 -->
+
+<!-- # Generate face outline (circle) -->
+<!-- theta <- seq(0, 2*pi, length.out = n) -->
+<!-- face_x <- cos(theta) -->
+<!-- face_y <- sin(theta) -->
+
+<!-- # Generate left eye (small circle) -->
+<!-- eye_theta <- seq(0, 2*pi, length.out = n/2) -->
+<!-- left_eye_x <- -0.4 + 0.1 * cos(eye_theta) -->
+<!-- left_eye_y <-  0.5 + 0.1 * sin(eye_theta) -->
+
+<!-- # Generate right eye (small circle) -->
+<!-- right_eye_x <- 0.4 + 0.1 * cos(eye_theta) -->
+<!-- right_eye_y <- 0.5 + 0.1 * sin(eye_theta) -->
+
+<!-- # Generate mouth (smiling arc) -->
+<!-- mouth_theta <- seq(0, pi, length.out = n/2) -->
+<!-- mouth_x <- 0.5 * cos(mouth_theta) -->
+<!-- mouth_y <- 0.5 * (sin(-mouth_theta)) -->
+
+<!-- # Combine all points into a matrix -->
+<!-- smiley_face_matrix <- rbind( -->
+<!--   cbind(face_x, face_y), -->
+<!--   cbind(left_eye_x, left_eye_y), -->
+<!--   cbind(right_eye_x, right_eye_y), -->
+<!--   cbind(mouth_x, mouth_y) -->
+<!-- ) -->
+
+<!-- plot(smiley_face_matrix); add_lines("xy") -->
+<!-- plot(rotate_points(smiley_face_matrix, 90)); add_lines("xy") -->
+<!-- plot(rotate_points(smiley_face_matrix, 180)); add_lines("xy") -->
+<!-- plot(smiley_face_matrix %>% {(abs(.)^.7)*sign(.)}); add_lines("xy") -->
+
+<!-- # Define parameters -->
+<!-- num_circles <- 5  # Number of concentric circles -->
+<!-- num_points <- 1e3  # Number of points per circle -->
+<!-- radii <- seq(0.2, 1.0, length.out = num_circles)  # Radii of circles -->
+
+<!-- # Initialize empty vectors for coordinates -->
+<!-- x_coords <- c() -->
+<!-- y_coords <- c() -->
+
+<!-- # Generate points for each circle -->
+<!-- for (r in radii) { -->
+<!--   theta <- seq(0, 2*pi, length.out = num_points) -->
+<!--   x_coords <- c(x_coords, r * cos(theta)) -->
+<!--   y_coords <- c(y_coords, r * sin(theta)) -->
+<!-- } -->
+
+<!-- # Combine into a matrix -->
+<!-- concentric_circles_matrix <- cbind(x_coords, y_coords) -->
+
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.9)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.6)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.3)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1)*sign(.)}, type = "l"  , asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.9)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.5)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.3)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.1)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.3)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.5)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.9)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1)*sign(.)}, type = "l"  , asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.3)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.6)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.9)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.9)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.6)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.3)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1)*sign(.)}, type = "l"  , asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.9)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.5)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.3)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.1)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.3)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.5)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.9)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1)*sign(.)}, type = "l"  , asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.3)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.6)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.9)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.9)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.6)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.3)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1)*sign(.)}, type = "l"  , asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.9)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.5)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.3)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.1)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.3)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.5)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.9)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1)*sign(.)}, type = "l"  , asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.3)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.6)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.9)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.9)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.6)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.3)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1)*sign(.)}, type = "l"  , asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.9)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.5)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.3)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.1)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.3)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.5)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.9)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1)*sign(.)}, type = "l"  , asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.3)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.6)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.9)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.9)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.6)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.3)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1)*sign(.)}, type = "l"  , asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.9)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.5)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.3)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.1)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.3)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.5)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.9)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1)*sign(.)}, type = "l"  , asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.3)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.6)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.9)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.9)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.6)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.3)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1)*sign(.)}, type = "l"  , asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.9)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.5)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.3)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.1)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.3)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.5)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.9)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1)*sign(.)}, type = "l"  , asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.3)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.6)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.9)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.9)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.6)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.3)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1)*sign(.)}, type = "l"  , asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.9)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.5)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.3)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.1)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.3)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.5)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.9)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1)*sign(.)}, type = "l"  , asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.3)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.6)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.9)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.9)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.6)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.3)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1)*sign(.)}, type = "l"  , asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.9)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.5)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.3)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.1)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.3)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.5)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.9)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1)*sign(.)}, type = "l"  , asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.3)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.6)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.9)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.9)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.6)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.3)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1)*sign(.)}, type = "l"  , asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.9)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.5)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.3)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.1)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.3)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.5)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.9)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1)*sign(.)}, type = "l"  , asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.3)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.6)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.9)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.9)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.6)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.3)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1)*sign(.)}, type = "l"  , asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.9)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.5)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.3)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.1)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.3)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.5)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^.9)*sign(.)}, type = "l", asp = 1) -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1)*sign(.)}, type = "l"  , asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.3)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.6)*sign(.)}, type = "l", asp = 1)  -->
+<!-- plot(concentric_circles_matrix %>% {(abs(.)^1.9)*sign(.)}, type = "l", asp = 1)  -->
+
+<!-- ``` -->
+

@@ -1,0 +1,240 @@
+---
+title: "13.4_SNP_Contrasts"
+author: "Christian Anderson"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+
+# Packages
+```{r}
+
+library(tidyr)
+library(reshape2)
+library(purrr)
+library(GGally)
+library(tidyverse)
+library(ggplot2)
+library(ggrepel)
+library(gridExtra)
+library(ComplexHeatmap)
+library(viridis)
+library(zoo)
+library(plotly)
+library(mgcv)
+library(tools)
+library(mice)
+library(ggrepel)
+library(htmltools)
+library(Metrics)
+library(psych)
+library(car)
+library(stats)
+library(lme4)
+library(lmerTest)
+library(ape)
+library(SingleCellExperiment)
+library(scater)
+library(dplyr)
+library(HDF5Array)
+library(parallel)
+library(emmeans)
+library(gplots)
+library(limma)
+library(optimx)
+
+rm(list = ls())
+gc()
+
+options(max.print = 150)
+
+```
+
+### functions
+```{r}
+
+source("/Users/canderson/Documents/LMRI/PRJ2024001/version015/analysis/00_MyFunctions.R")
+
+```
+
+# Load Data
+```{r}
+
+
+wd_path = "~/Documents/LMRI/PRJ2024001/version015/"
+
+a_path <- paste0(wd_path, "results/clustering/13_clustering/T2D_Contrasts/")
+if(!dir.exists(a_path)) {
+  dir.create(a_path, recursive = TRUE)
+  
+}
+# load experiment
+sce <- HDF5Array::loadHDF5SummarizedExperiment(paste0(wd_path, "processed_data/sce006.h5"))
+
+
+```
+
+
+
+# ________________________________________________
+# Do snps predict Route?
+## rf_route
+```{r}
+
+# names of genetic vars
+gene_vars <- grep("^rs|X6", names(colData(sce)), value = TRUE)
+
+# filter data to just one obsservation per patient
+route_snp_d <- colData(sce) %>% 
+  as.data.frame() %>% 
+  select(patID, route = rf_route,clust = km_nn_cluster, all_of(gene_vars)) %>% 
+  drop_na() %>% 
+  distinct() 
+
+# refactor to be from left to right 
+route_snp_d$route <- factor(route_snp_d$route, levels  = c("A", "C", "X", "D", "B"))
+
+design <- route_snp_d[, gene_vars] %>% 
+  scale()
+  
+response <-   t(data.matrix(route_snp_d[, "route", drop = FALSE] ))
+
+# fit linear model Y (responSEXFn) * X (nxPredictors)
+route_snp_fit <- lmFit(as.numeric(response), design)
+
+dplyr:: 
+# fit contrasts, etc. 
+route_snp_efit <- eBayes(route_snp_fit)
+# t2d_snp_cfit <- contrasts.fit(t2d_snp_fit, limma_contrasts)
+# t2d_snp_c_efit <- eBayes(t2d_snp_cfit)
+
+(route_snp_results <- sapply(seq(gene_vars), function(i) topTable(route_snp_efit, i)) %>% 
+    t()) 
+rownames(route_snp_results) <- gene_vars
+route_snp_results <- apply(route_snp_results,c(1,2), function(x) x[[1]])
+route_snp_results <- as.data.frame(route_snp_results)
+route_snp_results$SNP <- gene_vars
+
+ggplot(route_snp_results, aes(logFC, -log10(P.Value), color = SNP, label = SNP))+
+  geom_vline(xintercept = 0, linetype = 2)+
+  geom_hline(yintercept = -log10(.05), linetype = 2)+
+  geom_line(alpha = .5, show.legend = FALSE)+
+  geom_point(show.legend = FALSE)+
+  geom_label_repel(show.legend = FALSE)+
+  theme_bw()+
+  ggtitle("Limma lm of RF_route ~ SNPs")
+
+```
+
+## contrasts on clusters
+snps ~ clusters, because clusters not y|x ~ N(0, sd)
+```{r}
+
+# SNPS~CLUSTERS
+# cluster predictors
+design <-model.matrix(~0+clust, data = route_snp_d)
+
+# SNP responses
+response_m <- t(route_snp_d[, gene_vars] )
+
+
+# block correlation
+how.long(T)
+dup_corr <-  duplicateCorrelation(response_m,
+                             design =  design,
+                             block = route_snp_d$patID
+                             )
+how.long()
+dup_corr
+
+
+
+# linear model 
+clust_snp_fit <- lmFit(response_m, design, correlation = dup_corr)
+
+# pink is left route (3-(11,9,7)), yellow is right route (4, ...)
+contrast.matrix <- makeContrasts(L.v.R=((clust3+clust7+clust9+clust11)/4)-((clust4+clust6+clust8+clust10)/4),
+                                 # R.v.five = ((clust4+clust6+clust8+clust10)/4) - clust5,
+                                 # Rend.v.five = ((clust6+clust8+clust10)/3) - clust5,
+                                 # L.v.five = ((clust3+clust7+clust9+clust11)/4) - clust5,
+                                 # Lend.v.five = ((clust7+clust9+clust11)/3) - clust5,
+                                 # RL.v.five= ((clust3+clust7+clust9+clust11+clust4+clust6+clust8+clust10)/8) - clust5,
+                                 levels=design)
+
+# calculate contrasts
+clust_snp_fit_contrasts <- contrasts.fit(clust_snp_fit, contrast.matrix)
+
+
+
+# Ebayes on contrasts
+clust_snp_fit_contrasts_efit <- eBayes(clust_snp_fit_contrasts)
+clust_snp_fit_contrasts_results<- lapply(1:ncol(contrast.matrix), function(i)topTable(clust_snp_fit_contrasts_efit,i, 20)) 
+
+names(clust_snp_fit_contrasts_results) <- colnames(contrast.matrix)
+
+# joine together
+clust_snp_fit_contrasts_results <- sapply(names(clust_snp_fit_contrasts_results),function(name){
+    dat <- clust_snp_fit_contrasts_results[[name]]
+    dat$contrast = name
+    return(dat)
+  }, simplify = FALSE) %>% 
+  do.call(rbind,.)
+
+clust_snp_fit_contrasts_results$Estimate <- clust_snp_fit_contrasts_results$logFC
+clust_snp_fit_contrasts_results$logFC <- NULL
+
+clust_snp_fit_contrasts_results %>% 
+  rownames_to_column("SNP") %>% 
+  mutate(SNP = gsub(".*\\.five\\.|.*\\.R\\.", "", SNP)) %>% 
+  ggplot(aes(Estimate, -log10(P.Value), color = SNP, label = SNP))+
+  geom_vline(xintercept = 0, linetype = 2)+
+  geom_hline(yintercept = -log10(.05), linetype = 2)+
+  geom_line(alpha = .3, show.legend = FALSE)+
+  geom_point(show.legend = FALSE)+
+  geom_label_repel(show.legend = FALSE)+
+  theme_bw()+
+  ggtitle("lmFit Left_route - Right_route Contrasts", "SNPs~Clusters")
+
+
+```
+
+
+## Route by snps glmer
+model using model correcting for all snps effect
+```{r}
+
+route_snp_d$route_fixed <- ifelse(route_snp_d$route %in% c("A", "C"), 0, 1)
+route_snp_d$route_fixed[route_snp_d$route == "X"] <- NA
+
+# matrix of pcs for modeling d
+pcs <-colData(sce) %>% 
+  as.data.frame() %>% 
+  select(patID, matches("PC10|PC[1-9]$")) %>% 
+  distinct() %>% 
+  left_join(route_snp_d, .) %>% 
+  select(matches("PC10|PC[1-9]$")) %>% 
+  data.matrix()
+
+# mod <- glm(y~ t(response_m), data = route_snp_d, family = "binomial")
+mod <- glmer(route_fixed~ scale(t(response_m)) + (1|patID) + scale(pcs), data = route_snp_d, family = "binomial",
+             # control = glmerControl(optimizer ='optimx', optCtrl=list(method='L-BFGS-B'))
+             control = glmerControl( optCtrl=list(method='BOBYQA'))
+             )
+route_snp_results <- list("route~SNPs" = summary(mod)) %>% 
+  extract_results() %>% 
+  filter(!grepl("Intercept", Term)) %>% 
+  mutate(Term = gsub("t\\(response_m\\)|scale\\(|pcs|\\)|", "", Term)) 
+
+route_snp_results %>% 
+  ggplot(aes(Estimate, -log10(`Pr(>|z|)`), color = Term, label = Term))+
+  geom_vline(xintercept = 0, linetype = 2)+
+  geom_hline(yintercept = -log10(.05), linetype = 2)+
+  geom_line(alpha = .5, show.legend = FALSE)+
+  geom_point(show.legend = FALSE)+
+  geom_label_repel(show.legend = FALSE)+
+  theme_bw()+
+  ggtitle("GLMER Route ~ scale(t(response_m)) + (1|patID) + scale(pcs)")
+  
+
+
+```

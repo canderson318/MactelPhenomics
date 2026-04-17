@@ -1,0 +1,61 @@
+Supplementary Methods:
+
+Data Cleaning
+Features and observations with a missingness rate greater than or equal to Q3+1.5*IQR were discarded. An additional number of features were also discarded because they were too sparse (skewed towards zero) to be meaningful (skewness > 30), measured in an ETDRS perifoveal area, or functionally dependent on another feature. This resulted in a total of 343 observations and 37 features discarded from the dataset.
+
+ETDRS Mapping 
+Variables corresponding to the nine zones of the ETDRS grid were mapped as follows for both eyes: 1, central; 2, superior-inner; 3, nasal-inner; 4, inferior-inner; 5, temporal-inner; 6, superior-outer; 7, nasal-outer; 8, inferior-outer; 9, temporal-outer. 
+
+Imputation QC
+Following imputation, an additional seven variables were removed because they had a missingness rate and an original versus imputed correlation test p-value of less than 0.05%.
+
+Chew Severity Score Calculation
+Scores were assigned cumulatively, with each grade building on the previous:
+	•	Grade 0: no EZ-loss, no irregular RPE, and no hyper-reflectivity on the temporal side.
+	•	Grade 1: juxtafoveal EZ-loss.
+	•	Grade 2: central EZ-loss (ETDRS zone 1). 
+	•	Grade 3: any para/perifoveal irregular RPE (ETDRS zones 2-9). 
+	•	Grade 4: hyper-reflectivity on the temporal side. 
+	•	Grade 5: central irregular RPE (ETDRS zone 1).
+	•	Grade 6: neovascularization. 
+
+Cluster Profiles
+Clusters 1 and 2 are similar, both clearly very early disease stages of MacTel, with notably good vision and few of the clinical signs of MacTel. Cluster 2, however, has an increased prevalence of juxtafoveal EZ-loss compared to Cluster 1. Cluster 3 has slightly more signs of MacTel, with the most predictive factor being central EZ-loss. Cluster 4 shows intermediate signs of MacTel, specifically intra-retinal pigment migration and inner-temporal irregular RPE, as well as local decreased auto-fluorescence at the vessel end. Eyes in cluster 5 have increased loss of central and inner-nasal retinal transparency and decreased visual acuity. Cluster 1 is similar to cluster 5, but has considerably worse vision. Cluster 6 has worse vision than cluster 13, which can be explained by the relatively thin parafovea. Cluster 12 has the thinnest parafovea and the worst vision compared to any other cluster. Cluster 10 is distinct for increased levels of inner-nasal right-angle veins, inner-nasal blunted retinal vessels, and central dilated retinal vessels. Eyes in cluster 8 present increased inner-superior and inner-inferior dilated retinal vessels, visible telangiectasial vessels, and blunted retinal vessels. Cluster 9 has the thickest parafovea with the most foveal detachment of any cluster. Cluster 11 is somewhat of an outgroup, having some of the only inner-capillary leakage of any cluster, as is cluster 7, distinct for its having some of the only outer-nuclear-layer loss.  Cluster 7 is also unique for being almost entirely composed of observations taken from the same clinical site.
+
+MST Validation 
+The MST algorithm infers a graph, Gm, that finds the most parsimonious graph that connects all cluster centroids. To test whether inter-cluster eye movement reflects Gm’s structure, we used the transitions of the longitudinal eyes to compare their alignment to what we would expect under several hypothetical structures. We assume that the observed transitions follow some unknown structure G, which GM approximates. Three other models besides GM could also explain eye movement: the first two presume that eye movement is linear (GL7-stage, a linear graph of clusters ordered by median 7-stage progression score, and GLPP, a linear graph of clusters ordered by median PP); the third assumes that eye movement is unordered (GC, the complete graph of all clusters). We simplified the two trajectories by collapsing the terminal nodes into their parent cluster, ignoring cluster 7 (Supplementary Materials). By comparing the observed transitions’ agreement with GM, GC, and GL7-stage, GLPP, we can thereby understand how accurately GM approximates G. Let DB, DL7-stage, DLPP, and DC be the n x n distance matrices of graphs GM, GL7-stage, GLPP, and GC, respectively. Let TB, TLPP, and TC be the element-wise reciprocals of DB + 1, DLPP + 1, DL7-stage + 1, and DC + 1. These are conceptually proximity matrices that capture proximity between clusters. Let PB, PLPP, PL7-stage, and PC be the row-sum-normalized versions of TB, TLPP, TL7-stage, and TC. These matrices represent the probability of transitioning from each cluster to every other cluster. Additionally, let To represent the matrix of observed eye transitions. A set of potential, ‘expected,’ transition matrices was created from the probability matrices PB, PLPP, PL7-stage, and PC by multiplying each value by the corresponding total number of observed transitions for that row. A likelihood ratio test was used to measure how well the observed transitions, To, aligned with each potential graph structure (Supplementary Figure 11). The G-statistic was calculated by multiplying the observed count in each cell by the natural logarithm of the ratio of observed to expected counts (Hoey 2012). These values were summed across all cells and then multiplied by 2 to obtain the final statistic. Diagonal entries were excluded from the calculation to assess the alignment of inter-cluster transitions only. The G-statistic quantifies how much observed counts differ from expected; thus, lower values of G indicate better alignment between observed and expected.
+
+Speudotime calculation 
+Speucotime (here referred to as speudoprogression) was calculated following the TSCAN package(Ji Z 2025) presented in the OSCA book (Robert Amezquita, Aaron Lun, Stephani...). This method is implemented to be used for pseudotime calculation by projecting the cells directly onto the MST. The choice for this algorithm was as follows. First, the convenience of this project was performed entirely in R, and such a pipeline was available in R. Second, as this methodology is already included in the R-OSCA scRNA-pipeline, MST works well with the previous steps in this analysis. Third, this method is fully unsupervised and doesn’t make assumptions about the number of trajectories, which is particularly important for the exploratory nature of this project. Lastly, this method is implemented to be used for pseudotime calculation by projecting the cells directly onto the MST.
+
+
+Eye Transition Structure Alignment
+Several structures potentially align with observed transitions. These have been simplified to only include the key clusters that characterize the overall trajectories presented by the MST.
+	GM: 1-2-3-(7, 4-6-{12,13}, and 5-{9,11,8,10})
+	GM collapsed: 1-2-3-(4-6, and 5)
+	GLChew: 1-2-3-4-5-7-8-9-10-11-6-12-13 
+	GLChew collapsed: 1-2-3-4-5-6 
+	GLPP: 1-2-3-4-5-6-7-8-9-10-11-13-12
+	GLPP collapsed: 1-2-3-4-5-6
+	GC: The complete graph of all 13 clusters
+	GC collapsed: The complete graph of clusters 1, 2, 3, 4, 5, and 6
+Clustering Robustness
+The dimension reduction and trajectory workflow was run on several data matrices derived from the original assay. These include: the original assay with added Gaussian noise (N(0, 0.5)), the original assay with 60, 40, and 20 percent set to missing, and three assays with only European, Australian, and United States patients, respectively (Supplementary Figures 12-13). Also, by running the clustering with different seeds, k’s (nearest-neighbor), and centers (k-means), we sample a subset of all possible clustering solutions (Supplementary Figure 14).
+
+Trajectory Classification
+A training dataset was created consisting of 533 labeled patient-eye labels, which were manually assigned according to the scheme below:
+Sequences following the order… are classified as …
+	•	1-2-3-{5-{11,10,8,9}} → A
+	•	1–2-3-{4-6-{13,12}} → B. 
+	•	1-2-3-7 or {1,2,3,7} → none
+A clear distinction between groups A and B was present along PC2. Therefore, these features were used to predict the label of the remaining patient-eyes. The average of each of the 50 principal components, the average of PC1 times PC2, and the average of PC1 squared times PC2 squared (averages were taken per patient-eye) were used to train a linear discriminant analysis (LDA) multi-class classification model that finds the optimal boundary dividing each class. This model achieved a predictive accuracy of 
+85% when using a 70/30 train/test split. 
+
+
+Supplementary Results:
+Principal component analysis
+We calculated 50 principal components (PCs) to reduce the dimensionality of the data and create variables that are independent of each other for use in subsequent analyses. Components 1 and 2 explain 12% and 7% of the variation, respectively. Cumulatively, the 50 components explain 88% of the variation in the data. 
+
+
+
+
