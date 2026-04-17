@@ -1,1 +1,0 @@
-Applying single-cell RNA-seq techniques to large-scale clinical phenotypic data enables the discovery of differential disease progression trajectories and the construction of data-driven progression scores. These can then be integrated into precision medicine studies to investigate the drivers of patient-specific disease outcomes. 
