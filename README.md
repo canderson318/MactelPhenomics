@@ -1,4 +1,4 @@
-# MacTel Disease Trajectory Analysis — Public Analysis Scripts
+# MacTel Disease Trajectory Analysis — Select Analysis Scripts
 
 Companion code for the manuscript. These six R scripts reproduce the core analytical pipeline: imputation, clustering, feature profiling, network validation, and progression modeling. No data loading, file paths, or dataset-specific code is included — the user supplies input objects as described in each script's header.
 
